@@ -6,13 +6,16 @@ import StatusLight from '@renderer/components/StatusLight.vue'
 /**
  * 项目卡片（计划 §2.4 / §3 S3.6）：红绿灯 + 名称 + JDK/PID/uptime + 启停按钮。
  * 操作事件上抛 DashboardView 统一处理（含确认框与消息提示）；
- * "查看日志"打开 LogViewer 抽屉（S4：实时滚动/暂停/过滤/上下文检索）。
+ * "查看日志"打开 LogViewer 抽屉（S4：实时滚动/暂停/过滤/上下文检索）；
+ * 多选复选框（2026-11-10）：勾选状态由父组件持有（selectedIds Set），上抛 select。
  */
 const props = defineProps<{
   project: ProjectWithRuntime
   jdkName: string
   /** 视图层秒级 tick（RUNNING uptime 派生用，避免每卡片自起定时器） */
   now: number
+  /** 多选批量操作：本卡片是否已勾选 */
+  selected: boolean
 }>()
 
 const emit = defineEmits<{
@@ -22,6 +25,8 @@ const emit = defineEmits<{
   logs: [project: ProjectWithRuntime]
   edit: [project: ProjectWithRuntime]
   remove: [project: ProjectWithRuntime]
+  /** 多选勾选/取消（父组件持有 selectedIds 集合） */
+  select: [id: string, checked: boolean]
 }>()
 
 const isRunningLike = computed(() => isRunningStatus(props.project.status))
@@ -54,6 +59,11 @@ function formatDuration(ms: number): string {
 <template>
   <el-card class="project-card" shadow="hover" :class="{ abnormal: project.status === 'ABNORMAL_EXIT' }">
     <div class="head">
+      <el-checkbox
+        :model-value="selected"
+        :aria-label="`选择项目 ${project.name}`"
+        @update:model-value="(v: boolean) => emit('select', project.id, v === true)"
+      />
       <StatusLight :status="project.status" :note="project.note" />
       <span class="name" :title="project.name">{{ project.name }}</span>
     </div>

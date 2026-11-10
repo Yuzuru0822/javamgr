@@ -1,6 +1,6 @@
 {
   "name": "java-process-manager",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Windows Java 进程管理器（Electron + 内嵌 MCP）",
   "main": "./out/main/index.js",
   "author": "javamgr",
@@ -25,10 +25,12 @@
   "devDependencies": {
     "@types/node": "^22.5.0",
     "@vitejs/plugin-vue": "^5.1.0",
+    "@vue/test-utils": "^2.5.1",
     "electron": "^33.0.0",
     "electron-builder": "^26.18.0",
     "electron-vite": "^2.3.0",
     "element-plus": "^2.8.0",
+    "happy-dom": "^21.0.4",
     "pinia": "^2.2.0",
     "typescript": "~5.8.3",
     "vite": "^5.4.0",

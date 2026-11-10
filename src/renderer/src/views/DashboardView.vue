@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { ProjectWithRuntime } from '@shared/types'
 import { useProjectsStore } from '@renderer/stores/projects'
@@ -134,6 +134,80 @@ async function handleStopAll(): Promise<void> {
   }
 }
 
+// ---------- 多选批量（2026-11-10）：勾选卡片子集批量 启动/重启/停止 ----------
+
+/** 选集整体替换（Set 经 ref 持有，替换触发响应；逐项增删不触发） */
+const selectedIds = ref(new Set<string>())
+const selectedCount = computed(() => selectedIds.value.size)
+
+function toggleSelect(id: string, checked: boolean): void {
+  const next = new Set(selectedIds.value)
+  if (checked) next.add(id)
+  else next.delete(id)
+  selectedIds.value = next
+}
+
+function selectAll(): void {
+  selectedIds.value = new Set(store.projects.map((p) => p.id))
+}
+
+function clearSelection(): void {
+  selectedIds.value = new Set()
+}
+
+const allSelected = computed(
+  () => store.projects.length > 0 && selectedCount.value === store.projects.length
+)
+const someSelected = computed(
+  () => selectedCount.value > 0 && selectedCount.value < store.projects.length
+)
+
+// 列表变化（删除项目/刷新）时剔除已消失的 id，避免对幽灵 id 发起批量操作
+watch(
+  () => store.projects,
+  (projects) => {
+    const alive = new Set(projects.map((p) => p.id))
+    const next = new Set([...selectedIds.value].filter((id) => alive.has(id)))
+    if (next.size !== selectedIds.value.size) selectedIds.value = next
+  }
+)
+
+/**
+ * 对所选子集批量执行单项启停通道（与全部启动/停止同语义：主进程按 projectId
+ * 操作队列串行化，不同项目并发、单项失败不中断；结果汇总提示）。
+ */
+async function runBatchOnSelected(op: 'start' | 'restart' | 'stop'): Promise<void> {
+  const ids = [...selectedIds.value]
+  if (ids.length === 0 || batchBusy.value) return
+  const label = op === 'start' ? '启动' : op === 'restart' ? '重启' : '停止'
+  batchBusy.value = true
+  try {
+    const settled = await Promise.allSettled(ids.map((id) => store[op](id)))
+    const failures: string[] = []
+    settled.forEach((result, i) => {
+      if (result.status === 'fulfilled' && result.value.ok) return
+      const name = store.projects.find((p) => p.id === ids[i])?.name ?? ids[i]
+      failures.push(
+        `${name}：${
+          result.status === 'rejected'
+            ? errText(result.reason)
+            : (result.value.error ?? '未知错误')
+        }`
+      )
+    })
+    if (failures.length === 0) {
+      ElMessage.success(`所选${label}完成（${ids.length} 个项目）`)
+    } else {
+      ElMessage.warning({
+        message: `所选${label}：成功 ${ids.length - failures.length}，失败 ${failures.length}——${failures.join('；')}`,
+        duration: 6000
+      })
+    }
+  } finally {
+    batchBusy.value = false
+  }
+}
+
 // ---------- JDK 名映射 ----------
 
 const jdkNameById = computed(() => {
@@ -195,6 +269,45 @@ onBeforeUnmount(() => {
       >
         全部停止
       </el-button>
+      <el-divider direction="vertical" />
+      <el-checkbox
+        :model-value="allSelected"
+        :indeterminate="someSelected"
+        :disabled="store.projects.length === 0"
+        @update:model-value="(v: boolean) => (v ? selectAll() : clearSelection())"
+      >
+        全选（{{ selectedCount }}/{{ store.projects.length }}）
+      </el-checkbox>
+      <el-button
+        type="success"
+        plain
+        :disabled="selectedCount === 0 || batchBusy"
+        @click="runBatchOnSelected('start')"
+      >
+        启动所选
+      </el-button>
+      <el-button
+        :disabled="selectedCount === 0 || batchBusy"
+        @click="runBatchOnSelected('restart')"
+      >
+        重启所选
+      </el-button>
+      <el-button
+        type="danger"
+        plain
+        :disabled="selectedCount === 0 || batchBusy"
+        @click="runBatchOnSelected('stop')"
+      >
+        停止所选
+      </el-button>
+      <el-button
+        v-if="selectedCount > 0"
+        link
+        :disabled="batchBusy"
+        @click="clearSelection"
+      >
+        取消选择
+      </el-button>
     </div>
 
     <div v-if="store.projects.length > 0" class="grid">
@@ -204,6 +317,8 @@ onBeforeUnmount(() => {
         :project="project"
         :jdk-name="jdkNameOf(project)"
         :now="now"
+        :selected="selectedIds.has(project.id)"
+        @select="toggleSelect"
         @start="handleStart"
         @stop="handleStop"
         @restart="handleRestart"

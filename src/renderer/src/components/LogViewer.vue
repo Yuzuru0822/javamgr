@@ -84,10 +84,20 @@ function goNextMatch(): void {
   jumpToMatch(matchIndex.value + 1)
 }
 
+/**
+ * 重置过滤（2026-11-10 修复"重置按钮失效"）：仅清 keyword/level 时，视图停留在过滤
+ * 期间被 scrollToIndex(0) 拉到的顶部且 pinned 已脱离——日志继续追加却不自动滚动，
+ * 看起来按钮没生效。完整语义 = 清条件 + 未暂停时恢复贴底跟随（displayLines 全量
+ * 保留，仅重新定位到底部；暂停中冻结视口，由「恢复滚动」负责追平）。
+ */
 function clearFilter(): void {
   logsStore.keyword = ''
   logsStore.levelFilter = ''
   matchIndex.value = 1
+  if (!logsStore.paused) {
+    pinned.value = true
+    void nextTick(() => scrollToBottom())
+  }
 }
 
 watch([() => logsStore.keyword, () => logsStore.levelFilter], () => {
@@ -212,11 +222,21 @@ function togglePause(): void {
   if (!logsStore.paused) jumpToLatest()
 }
 
-/** 恢复贴底并跳到缓冲最新（暂停恢复 / 手动跳最新共用） */
+/**
+ * 恢复贴底并跳到最新（暂停恢复 / 手动跳最新共用）。
+ * 2026-11-10 修复：原实现用缓冲快照**替换** displayLines——缓冲只含打开查看器后
+ * 实时到达的行（readHistory 的历史不在其中），历史被清空、视图"跳空"。改为**合并**
+ * 追加 marker 之后到达的新行（与实时追加 watcher 同款去重逻辑），全量保留 + 滚底。
+ */
 function jumpToLatest(): void {
   const snapshot = logsStore.snapshot(currentProjectId.value)
+  const fresh = snapshot.length >= lastBufferLen.value ? snapshot.slice(lastBufferLen.value) : []
   lastBufferLen.value = snapshot.length
-  displayLines.value = snapshot.slice()
+  if (fresh.length > 0) {
+    const merged = [...displayLines.value, ...fresh]
+    displayLines.value =
+      merged.length > LOG_BUFFER_LIMIT ? merged.slice(merged.length - LOG_BUFFER_LIMIT) : merged
+  }
   clampMatchIndex()
   pinned.value = true
   void nextTick(() => scrollToBottom())

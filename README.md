@@ -1,6 +1,6 @@
 # javamgr — Windows Java 进程管理器（Electron + 内嵌 MCP）
 
-桌面工具 + MCP 服务同体：注册预构建 jar 项目（不做编译构建），红绿灯启停（taskkill /T /F 杀进程树），双策略日志（logback 文件 tail / stdout 捕获 GBK·UTF-8 自动转码），内嵌 MCP 双通道（Streamable HTTP 契约端口 + stdio 桥接）供 Agent 全管控——取代「CD → 开 CMD → java -jar」手工工作流。
+桌面工具 + MCP 服务同体：注册预构建 jar 项目（不做编译构建），红绿灯启停 + 卡片多选批量（启动/重启/停止所选，PowerShell 杀进程树），双策略日志（logback 文件 tail / stdout 捕获 GBK·UTF-8 自动转码），内嵌 MCP 双通道（Streamable HTTP 契约端口 + stdio 桥接）供 Agent 全管控——取代「CD → 开 CMD → java -jar」手工工作流。
 
 - 技术栈：Electron 33 + electron-vite + Vue 3 + Element Plus + Pinia + TypeScript（strict）+ @modelcontextprotocol/sdk + zod + iconv-lite
 - 平台：仅 Windows、单用户、本地运行（无远程/多机/认证）
