@@ -110,6 +110,7 @@ stdio（桥接，不含端口、永远有效——自动发现主实例）：
 ## 进程与状态语义（摘）
 
 - **操作串行化**：同一项目的 start/stop/restart 经 projectId 级队列串行（GUI 与 MCP 同一队列）；RUNNING/STARTING 下重复 start 幂等返回当前 pid，绝不二次 spawn；restart 为原子组合（stop 等树死 → start）；
+- **工作目录**（2026-11-10 修复）：子进程 cwd = jar 所在目录，复刻「CD 到目录再 java -jar」语义——应用内相对路径读写（Spring `file:config/`、logback 相对 `<file>` 等按 `user.dir` 解析）落在 jar 平级，与手工运行行为一致；
 - **停止**：单次 PowerShell 调用完成「CIM 枚举后代 + 批量 `Stop-Process -Force`」（先子后主），外层硬超时 3s、超时必杀助手并自动降级为仅终止主进程；杀后用 `process.kill(pid, 0)` 零开销确认（500ms 间隔重试至 stopTimeoutMs 预算，默认 8s），仍存活补一次 Stop-Process，再不行显式报错；
 - **启动判定**：首条日志输出（stdout 或文件 tail 新增行）即 RUNNING；无输出时存活满 `startupGraceSeconds`（默认 5s）兜底转 RUNNING；
 - **退出策略**（设置页，默认 keep）：keep = 工具退出子进程保持运行（分离进程），重启工具后按 runs.json 的 PID + 启动时间重识别（存活者入 5s 批量轮询池，死亡检出 ≤2 个周期）；stopAll = 退出前逐项目杀树；

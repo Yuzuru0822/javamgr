@@ -223,6 +223,14 @@ describe('integration/process-manager：真实进程树终止（WMI 病态宿主
     )
     expect(running).toBe(true)
 
+    // 2026-11-10 cwd 修复（真实子进程验证）：banner 的 user.dir = jar 所在目录，
+    // 相对路径平级配置文件（Spring file:config/ 等）按此解析
+    const bannerUserDir = await waitFor(() => {
+      const m = sink.text.match(/user\.dir=(.+)/)
+      return m ? m[1]!.trim() : undefined
+    }, 10_000, 'banner 输出 user.dir')
+    expect(bannerUserDir.toLowerCase()).toBe(path.dirname(JAR_PATH).toLowerCase())
+
     // 子进程 pid 从夹具 banner 解析（child #N spawned, pid=X）
     const childPids = await waitFor(() => {
       const parsed = parseChildPids(sink.text)

@@ -45,17 +45,17 @@ function makeFakeChild(pid: number): FakeChild {
   return child
 }
 
-/** fake spawner：记录调用、递增 pid */
+/** fake spawner：记录调用（含 cwd）、递增 pid */
 function makeSpawner(): {
   spawner: SpawnFn
-  calls: Array<{ command: string; args: string[] }>
+  calls: Array<{ command: string; args: string[]; cwd: string }>
   children: FakeChild[]
 } {
-  const calls: Array<{ command: string; args: string[] }> = []
+  const calls: Array<{ command: string; args: string[]; cwd: string }> = []
   const children: FakeChild[] = []
   let nextPid = 4000
-  const spawner = ((command: string, args: readonly string[]) => {
-    calls.push({ command, args: [...args] })
+  const spawner = ((command: string, args: readonly string[], options: { cwd: string }) => {
+    calls.push({ command, args: [...args], cwd: options.cwd })
     const child = makeFakeChild(nextPid++)
     children.push(child)
     return child as unknown as ChildProcess
@@ -206,7 +206,7 @@ describe('process-manager / start 校验与 spawn 契约', () => {
     expect(pm.getRuntimeState(projectId)).toBeUndefined() // 状态不变
   })
 
-  it('spawn 契约：java.exe + 参数顺序（jvmArgs 在 -jar 前）+ detached/windowsHide/JAVA_HOME env', async () => {
+  it('spawn 契约：java.exe + 参数顺序（jvmArgs 在 -jar 前）+ detached/windowsHide/cwd=jar目录/JAVA_HOME env', async () => {
     const { spawner, calls, children } = makeSpawner()
     let captured: RunStartedEvent | undefined
     const { pm } = makeManager({
@@ -221,6 +221,8 @@ describe('process-manager / start 校验与 spawn 契约', () => {
     const call = calls[0]
     expect(call?.command).toBe(path.join(jdkHome, 'bin', 'java.exe'))
     expect(call?.args).toEqual(['-Xmx128m', '-jar', jarPath, '--interval=1000'])
+    // 2026-11-10 修复：cwd = jar 所在目录（复刻「CD 后 java -jar」；相对路径平级配置可读）
+    expect(call?.cwd).toBe(path.dirname(jarPath))
 
     // run:started 事件（S-1）：pid/runId/句柄交付
     expect(captured?.pid).toBe(children[0]?.pid)

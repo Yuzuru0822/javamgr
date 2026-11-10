@@ -73,9 +73,11 @@ public class Loggy {
     }
 
     long pid = ProcessHandle.current().pid();
-    // 首行纯 ASCII banner：GBK/UTF-8 下字节完全一致，编码自动判定不得据此锁定
+    // 首行纯 ASCII banner：GBK/UTF-8 下字节完全一致，编码自动判定不得据此锁定；
+    // user.dir 供集成测试断言子进程工作目录 = jar 所在目录（2026-11-10 cwd 修复）
     console.println("Loggy v1.0 starting: mode=" + mode + ", pid=" + pid
-        + ", charset=" + charset.name());
+        + ", charset=" + charset.name()
+        + ", user.dir=" + System.getProperty("user.dir"));
 
     if (children > 0) {
       spawnChildren(console, children);

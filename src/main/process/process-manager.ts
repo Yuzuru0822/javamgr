@@ -27,6 +27,7 @@ import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { access } from 'node:fs/promises'
+import path from 'node:path'
 import type { Readable } from 'node:stream'
 import type {
   BatchResult,
@@ -77,6 +78,8 @@ export type SpawnFn = (
     detached: boolean
     stdio: ['ignore', 'pipe', 'pipe']
     windowsHide: boolean
+    /** 工作目录 = jar 所在目录（复刻「CD 后 java -jar」语义） */
+    cwd: string
     env: NodeJS.ProcessEnv
   }
 ) => ChildProcess
@@ -390,13 +393,16 @@ export class ProcessManager {
     const logSource: LogSource = project.logFilePath ? 'file' : 'stdout'
     const runId = this.makeRunId()
 
-    // spawn：detached + unref（工具退出默认不杀子进程，R5），保留 stdout/stderr 管道引用
+    // spawn：detached + unref（工具退出默认不杀子进程，R5），保留 stdout/stderr 管道引用；
+    // cwd = jar 所在目录（2026-11-10 修复）：复刻「CD 到目录再 java -jar」语义——相对路径
+    // 配置（Spring file:config/、logback 相对 <file> 等）按 user.dir 解析，落在 jar 平级
     let child: ChildProcess
     try {
       child = this.spawner(javaExe, this.buildArgs(project), {
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
+        cwd: path.dirname(project.jarPath),
         env: { ...process.env, JAVA_HOME: jdk.homePath, ...project.envVars }
       })
     } catch (err) {
