@@ -1,6 +1,9 @@
 node_modules/
 out/
 dist/
+# electron-builder 输出目录（dist* 覆盖 dist-v0.3.0 等按版本命名的备用输出——
+# 主 dist 被进程锁住无法清空时经 -c.directories.output 绕开）
+dist-*/
 *.log
 .DS_Store
 
