@@ -248,13 +248,16 @@ try {
     )
     const toolsList = await waitBridge(101, '桥接 tools/list 响应')
     const toolNames = (toolsList?.result?.tools ?? []).map((t) => t.name).sort()
+    // 与 src/main/mcp/tools.ts 注册集一致（15 工具；桥接为消息级透传，清单即主实例清单）
+    const expectedTools = [
+      'batch_create_projects', 'create_project', 'delete_project', 'get_status', 'list_jdks',
+      'list_projects', 'read_logs', 'restart_project', 'scan_jars', 'search_logs',
+      'start_all_projects', 'start_project', 'stop_all_projects', 'stop_project', 'update_project'
+    ]
     const bridgeToolsOk =
-      toolNames.length === 7 &&
-      JSON.stringify(toolNames) ===
-        JSON.stringify(
-          ['get_status', 'list_projects', 'read_logs', 'restart_project', 'search_logs', 'start_project', 'stop_project']
-        )
-    record('⑤b 桥接 tools/list 转发（7 工具）', bridgeToolsOk, toolNames.join(','))
+      toolNames.length === expectedTools.length &&
+      JSON.stringify(toolNames) === JSON.stringify(expectedTools)
+    record(`⑤b 桥接 tools/list 转发（${expectedTools.length} 工具）`, bridgeToolsOk, toolNames.join(','))
     bridgeOk &&= bridgeToolsOk
 
     bridge.stdin.end()
