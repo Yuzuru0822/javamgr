@@ -10,6 +10,8 @@ export const IPC_REQUESTS = {
   PROJECTS_LIST: 'projects:list',
   /** ProjectInput | Project；运行中 update 允许保存但提示"重启后生效"（logFilePath 变更例外：即时切换） */
   PROJECTS_CREATE: 'projects:create',
+  /** {rootDir} | JarScanResult（递归扫描 *.jar，alreadyManaged 按当前纳管标注；2026-11-10 扫描导入） */
+  PROJECTS_SCAN_JARS: 'projects:scanJars',
   PROJECTS_UPDATE: 'projects:update',
   /** {id, confirm} | void；confirm=true → 先 stop（走操作队列）再删配置 */
   PROJECTS_DELETE: 'projects:delete',

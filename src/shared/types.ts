@@ -276,6 +276,30 @@ export interface McpProjectSummary {
   exitCode?: number
 }
 
+// ---------- jar 扫描导入（projects:scanJars / MCP scan_jars，2026-11-10） ----------
+
+/** 单个扫描到的 jar 条目 */
+export interface JarScanEntry {
+  /** jar 绝对路径（已规范化，可直接作为项目 jarPath） */
+  path: string
+  /** 建议项目名：文件名去扩展名 */
+  suggestedName: string
+  sizeBytes: number
+  /** 最后修改时间（ISO 8601） */
+  mtimeIso: string
+  /** 该 jar 已被某纳管项目引用（jarPath 相同，大小写不敏感规范化比对） */
+  alreadyManaged: boolean
+}
+
+/** jar 扫描结果：entries + 截断标志 + 跳过的目录（权限不足等） */
+export interface JarScanResult {
+  jars: JarScanEntry[]
+  /** 命中数超过上限被截断（默认 1000） */
+  truncated: boolean
+  /** 递归中被跳过的目录（权限拒绝等，不中断整体扫描） */
+  skippedDirs: string[]
+}
+
 // ---------- runs.json（S3 pid-registry 落盘契约，S0 先定形） ----------
 
 /** 单次运行记录：工具重启后按 PID + 启动时间重识别 */

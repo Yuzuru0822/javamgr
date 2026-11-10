@@ -27,6 +27,13 @@ export const projectUpdateSchema = projectCreateSchema.extend({
   id: z.string().min(1, '缺少项目 id')
 })
 
+/** projects:scanJars（2026-11-10 扫描导入：指定目录递归收集 *.jar） */
+export const scanJarsSchema = z
+  .object({
+    rootDir: z.string().min(1, '扫描目录不能为空')
+  })
+  .strict()
+
 /** projects:delete（运行中且 confirm=false 拒绝；confirm=true 先 stop 再删，S3 起生效） */
 export const projectDeleteSchema = z
   .object({
@@ -112,10 +119,11 @@ export const searchSchema = z
   })
   .strict()
 
-/** app:pickFile（S3：ProjectForm jar 路径文件选择器；filters 同 dialog.showOpenDialog） */
+/** app:pickFile（S3：ProjectForm jar 路径文件选择器；filters 同 dialog.showOpenDialog；directory=true 选目录，扫描导入用） */
 export const pickFileSchema = z
   .object({
     title: z.string().min(1).optional(),
+    directory: z.boolean().optional(),
     filters: z
       .array(
         z

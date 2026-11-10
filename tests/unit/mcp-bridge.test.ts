@@ -45,6 +45,9 @@ const services: McpToolServices = {
     readHistory: async () => ({ source: 'stdout', lines: [] }),
     search: async () => ({ matches: [], truncated: false }),
     switchRoute: () => {}
+  },
+  jarScanner: {
+    scanJars: async () => ({ jars: [], truncated: false, skippedDirs: [] })
   }
 }
 

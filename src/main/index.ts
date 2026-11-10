@@ -5,6 +5,7 @@ import { configureUserData, ensureDirs, getPaths } from './config/paths'
 import { ConfigStore, CONFIG_EVENTS } from './config/config-store'
 import { broadcastEvent, registerIpcHandlers } from './ipc/ipc-registry'
 import { DEFAULT_SCAN_ROOTS, mergeJdks, scanJdks } from './jdk/jdk-scanner'
+import { managedJarSet, scanJars } from './jar/jar-scanner'
 import { ProcessManager } from './process/process-manager'
 import { LogManager } from './log/log-manager'
 import { McpHost } from './mcp/mcp-host'
@@ -184,7 +185,12 @@ function startMainMode(): void {
       services: {
         store,
         processControl: processManager,
-        logService: logManager
+        logService: logManager,
+        jarScanner: {
+          // 与 IPC projects:scanJars 同一扫描器 + 已纳管标注口径（GUI/MCP 等价客户端）
+          scanJars: (rootDir: string) =>
+            scanJars(rootDir, managedJarSet(store.listProjects().map((p) => p.jarPath)))
+        }
       },
       portFile: getPaths().mcpPortFile,
       getPort: () => store.getSettings().mcpPort,

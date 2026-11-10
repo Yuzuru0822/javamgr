@@ -4,6 +4,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import type {
   BatchResult,
+  JarScanResult,
   OpResult,
   Project,
   ProjectInput,
@@ -69,6 +70,7 @@ const batchCalls: string[] = []
 const switchRouteCalls: string[] = []
 const createInputs: ProjectInput[] = []
 const updateInputs: Array<ProjectInput & { id: string }> = []
+const scanCalls: string[] = []
 /** store mock 的内存库（独立于夹具常量，create/delete 用例可安全变更） */
 const db: Project[] = structuredClone(projects)
 let idSeq = 0
@@ -135,6 +137,32 @@ const services: McpToolServices = {
     },
     switchRoute: (projectId) => {
       switchRouteCalls.push(projectId)
+    }
+  },
+  jarScanner: {
+    scanJars: async (rootDir): Promise<JarScanResult> => {
+      scanCalls.push(rootDir)
+      if (rootDir === 'D:\\bad') throw new Error('扫描路径不是目录：D:\\bad')
+      return {
+        jars: [
+          {
+            path: 'D:\\jars\\alpha.jar',
+            suggestedName: 'alpha',
+            sizeBytes: 1024,
+            mtimeIso: '2026-11-10T00:00:00.000Z',
+            alreadyManaged: false
+          },
+          {
+            path: 'D:\\jars\\managed.jar',
+            suggestedName: 'managed',
+            sizeBytes: 2048,
+            mtimeIso: '2026-11-10T00:00:00.000Z',
+            alreadyManaged: true
+          }
+        ],
+        truncated: false,
+        skippedDirs: []
+      }
     }
   }
 }
@@ -215,9 +243,9 @@ describe('mcp/resolveProject：§2.6 解析链', () => {
   })
 })
 
-// ---------- tools/list：13 工具契约 ----------
+// ---------- tools/list：15 工具契约 ----------
 
-describe('mcp/tools：tools/list 返回 13 工具（§2.6 原始 7 + 面板同款补齐 6）', () => {
+describe('mcp/tools：tools/list 返回 15 工具（原始 7 + 面板同款 6 + 扫描导入 2）', () => {
   it('工具名与数量精确匹配', async () => {
     const result = await client.listTools()
     expect(result.tools.map((t) => t.name).sort()).toEqual(
@@ -234,7 +262,9 @@ describe('mcp/tools：tools/list 返回 13 工具（§2.6 原始 7 + 面板同�
         'update_project',
         'delete_project',
         'start_all_projects',
-        'stop_all_projects'
+        'stop_all_projects',
+        'scan_jars',
+        'batch_create_projects'
       ].sort()
     )
   })
@@ -570,6 +600,68 @@ describe('mcp/tools：面板同款补齐工具', () => {
     expect(stop.isError).toBe(false)
     expect(stop.payload).toEqual({ results: [{ id: 'id-loggy', ok: true }] })
     expect(batchCalls).toEqual(['startAll', 'stopAll'])
+  })
+})
+
+// ---------- 扫描导入流程工具（2026-11-10：scan_jars + batch_create_projects） ----------
+
+describe('mcp/tools：扫描导入流程', () => {
+  it('scan_jars：透传扫描结果（suggestedName/alreadyManaged 供 Agent 组装清单）', async () => {
+    const { payload, isError } = await callTool('scan_jars', { rootDir: 'D:\\lib' })
+    expect(isError).toBe(false)
+    expect(scanCalls).toContain('D:\\lib')
+    expect(payload['jars']).toHaveLength(2)
+    expect(payload['jars']).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: 'D:\\jars\\alpha.jar', suggestedName: 'alpha', alreadyManaged: false }),
+        expect.objectContaining({ path: 'D:\\jars\\managed.jar', alreadyManaged: true })
+      ])
+    )
+    expect(payload['truncated']).toBe(false)
+  })
+
+  it('scan_jars：目录不存在等服务层错误 → isError 结构化返回', async () => {
+    const { payload, isError } = await callTool('scan_jars', { rootDir: 'D:\\bad' })
+    expect(isError).toBe(true)
+    expect(payload['error']).toContain('不是目录')
+  })
+
+  it('batch_create_projects：创建/跳过（skipExisting 默认，规范化大小写比对）/jdkId 校验三路汇总', async () => {
+    const { payload, isError } = await callTool('batch_create_projects', {
+      projects: [
+        { name: 'NewOne', jarPath: 'D:\\jars\\new-one.jar', jdkId: 'jdk-17' },
+        { name: 'Dup', jarPath: 'D:\\JARS\\LOGGY.JAR', jdkId: 'jdk-17' }, // 与 id-loggy 同 jar（大写）→ 跳过
+        { name: 'BadJdk', jarPath: 'D:\\jars\\bad.jar', jdkId: 'jdk-missing' }
+      ]
+    })
+    expect(isError).toBe(false) // 部分成功：整体不算失败
+    expect(payload).toMatchObject({ created: 1, skipped: 1, failed: 1 })
+    const results = payload['results'] as ToolPayload[]
+    expect(results[0]).toMatchObject({ name: 'NewOne', ok: true })
+    expect(typeof results[0]!['id']).toBe('string')
+    expect(results[1]).toMatchObject({ name: 'Dup', ok: true, skipped: true })
+    expect(results[2]).toMatchObject({ name: 'BadJdk', ok: false })
+    expect((results[2]!['error'] as string)).toContain('jdk-missing')
+    // 新项目确已落库（store mock 的内存 db）
+    expect(db.some((p) => p.name === 'NewOne')).toBe(true)
+  })
+
+  it('batch_create_projects：skipExisting=false 时同 jar 重复创建（不跳过）；清单内重复 jarPath 二次出现被跳过', async () => {
+    const first = await callTool('batch_create_projects', {
+      projects: [{ name: 'Solo', jarPath: 'D:\\jars\\solo.jar', jdkId: 'jdk-8' }],
+      skipExisting: false
+    })
+    expect(first.payload).toMatchObject({ created: 1, skipped: 0 })
+
+    // 同一清单内两条相同 jarPath：第二条按"清单内已创建"跳过（幂等）
+    const dup = await callTool('batch_create_projects', {
+      projects: [
+        { name: 'SoloA', jarPath: 'D:\\jars\\twins.jar', jdkId: 'jdk-8' },
+        { name: 'SoloB', jarPath: 'D:\\jars\\twins.jar', jdkId: 'jdk-8' }
+      ],
+      skipExisting: true
+    })
+    expect(dup.payload).toMatchObject({ created: 1, skipped: 1 })
   })
 })
 

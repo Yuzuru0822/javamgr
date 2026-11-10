@@ -1,6 +1,6 @@
 # javamgr — Windows Java 进程管理器（Electron + 内嵌 MCP）
 
-桌面工具 + MCP 服务同体：注册预构建 jar 项目（不做编译构建），红绿灯启停 + 卡片多选批量（启动/重启/停止所选，PowerShell 杀进程树），双策略日志（logback 文件 tail / stdout 捕获 GBK·UTF-8 自动转码），内嵌 MCP 双通道（Streamable HTTP 契约端口 + stdio 桥接）供 Agent 全管控——取代「CD → 开 CMD → java -jar」手工工作流。
+桌面工具 + MCP 服务同体：注册预构建 jar 项目（不做编译构建），红绿灯启停 + 卡片多选批量（启动/重启/停止所选，PowerShell 杀进程树），目录递归扫描 jar 批量导入（勾选 → 批量指派项目名/JDK → 一键纳管），双策略日志（logback 文件 tail / stdout 捕获 GBK·UTF-8 自动转码），内嵌 MCP 双通道（Streamable HTTP 契约端口 + stdio 桥接）供 Agent 全管控——取代「CD → 开 CMD → java -jar」手工工作流。
 
 - 技术栈：Electron 33 + electron-vite + Vue 3 + Element Plus + Pinia + TypeScript（strict）+ @modelcontextprotocol/sdk + zod + iconv-lite
 - 平台：仅 Windows、单用户、本地运行（无远程/多机/认证）
@@ -12,8 +12,9 @@ src/shared/          主/渲染/preload 共享类型与 IPC 通道常量（零�
 src/main/            主进程（唯一权威状态源）
   ├ process/         进程管理核心：状态机 + projectId 操作队列 + taskkill 树终止 + PID 重识别轮询池
   ├ log/             日志：file|stdout 双路由、编码自动判定（非 ASCII 才锁定）、10MB 轮转、检索
-  ├ mcp/             MCP 宿主（契约端口）+ 13 工具 + stdio 桥接（--mcp-stdio）
+  ├ mcp/             MCP 宿主（契约端口）+ 15 工具 + stdio 桥接（--mcp-stdio）
   ├ jdk/             JDK 扫描（标准根目录 + JAVA_HOME + 自定义根）
+  ├ jar/             jar 递归扫描导入（已纳管标注/截断上限/权限目录跳过）
   ├ config/          projects/jdks/settings.json（内存缓存 + 变更即写 + 原子写 + 损坏备份重建）
   └ telemetry/       event loop 延迟打点（设置页可查看；utilityProcess 演进条件度量）
 src/renderer/        Vue 3 控制台（项目面板 / JDK 管理 / 设置）
@@ -64,13 +65,14 @@ node scripts/packaged-smoke.mjs <目录>      # 指定 win-unpacked 目录
 
 ## Agent 接入（MCP）
 
-13 个工具，与 GUI 面板同源等价：
+15 个工具，与 GUI 面板同源等价：
 
 - 查询：`list_projects`（含实时状态）/ `get_status` / `list_jdks`（create/update 的 jdkId 候选）
 - 单项启停：`start_project`（幂等）/ `stop_project`（杀进程树）/ `restart_project`（原子组合）
 - 批量：`start_all_projects` / `stop_all_projects`（全部启动/停止，单项失败不中断）
 - 项目管理：`create_project`（新建）/ `update_project`（部分更新，缺省沿用现值）/ `delete_project`（运行中须 confirm=true：先停再删）
 - 日志：`read_logs` / `search_logs`（keyword/level/时间窗/上下文）
+- 扫描导入（与 GUI「扫描导入」同一流程）：`scan_jars`（递归收集目录下 *.jar，返回建议名与已纳管标注）→ `batch_create_projects`（批量纳管，skipExisting 默认跳过已纳管 jar，逐条校验 jdkId，单项失败不中断）
 
 `project` 参数支持精确 id → 精确名 → 忽略大小写 → 唯一前缀；歧义/未命中返回候选列表。
 

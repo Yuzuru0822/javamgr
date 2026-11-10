@@ -7,6 +7,7 @@ import { useJdksStore } from '@renderer/stores/jdks'
 import { ipc } from '@renderer/api/ipc'
 import ProjectCard from '@renderer/components/ProjectCard.vue'
 import ProjectForm from '@renderer/components/ProjectForm.vue'
+import JarImportDialog from '@renderer/components/JarImportDialog.vue'
 import LogViewer from '@renderer/components/LogViewer.vue'
 
 /**
@@ -29,6 +30,13 @@ const appVersion = ref('')
 // ---------- 表单 ----------
 const formVisible = ref(false)
 const editingProject = ref<ProjectWithRuntime | null>(null)
+
+/** jar 扫描导入对话框（2026-11-10）：有项目成功创建时刷新列表 */
+const importVisible = ref(false)
+
+function handleImported(): void {
+  store.refresh().catch((err: unknown) => ElMessage.error(`项目列表刷新失败：${errText(err)}`))
+}
 
 function openCreate(): void {
   editingProject.value = null
@@ -252,6 +260,7 @@ onBeforeUnmount(() => {
 
     <div class="toolbar">
       <el-button type="primary" @click="openCreate">新建项目</el-button>
+      <el-button plain @click="importVisible = true">扫描导入</el-button>
       <el-button
         type="success"
         :disabled="store.projects.length === 0 || batchBusy"
@@ -330,6 +339,8 @@ onBeforeUnmount(() => {
     <el-empty v-else description="暂无纳管项目：点击「新建项目」注册预构建 jar（配置持久化在 userData/config/projects.json）" />
 
     <ProjectForm v-model:visible="formVisible" :project="editingProject" />
+
+    <JarImportDialog v-model:visible="importVisible" @imported="handleImported" />
 
     <el-drawer
       v-model="logDrawerVisible"

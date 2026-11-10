@@ -4,6 +4,7 @@ import type { IpcErrorCode } from '@shared/ipc-error'
 import type {
   BatchResult,
   EventLoopMetrics,
+  JarScanResult,
   Jdk,
   JdkValidation,
   LogAppendedEvent,
@@ -57,6 +58,9 @@ export const ipc = {
     list: (): Promise<ProjectWithRuntime[]> => invoke<ProjectWithRuntime[]>(IPC_REQUESTS.PROJECTS_LIST),
     create: (input: ProjectInput): Promise<Project> =>
       invoke<Project>(IPC_REQUESTS.PROJECTS_CREATE, input),
+    /** 扫描导入：递归收集目录下 *.jar（alreadyManaged 按当前纳管标注） */
+    scanJars: (rootDir: string): Promise<JarScanResult> =>
+      invoke<JarScanResult>(IPC_REQUESTS.PROJECTS_SCAN_JARS, { rootDir }),
     update: (input: ProjectInput & { id: string }): Promise<Project> =>
       invoke<Project>(IPC_REQUESTS.PROJECTS_UPDATE, input),
     remove: (id: string, confirm: boolean): Promise<void> =>
@@ -105,9 +109,10 @@ export const ipc = {
     /** N-6：主进程事件循环延迟指标（设置页运行状况区块） */
     getEventLoopMetrics: (): Promise<EventLoopMetrics> =>
       invoke<EventLoopMetrics>(IPC_REQUESTS.APP_GET_EVENT_LOOP_METRICS),
-    /** 主进程文件选择对话框（S3：ProjectForm jar 路径选择）；取消返回 null */
+    /** 主进程文件/目录选择对话框；取消返回 null（directory=true 选目录，扫描导入用） */
     pickFile: (params?: {
       title?: string
+      directory?: boolean
       filters?: Array<{ name: string; extensions: string[] }>
     }): Promise<string | null> => invoke<string | null>(IPC_REQUESTS.APP_PICK_FILE, params ?? {})
   }

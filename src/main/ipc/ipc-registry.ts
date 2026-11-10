@@ -27,6 +27,7 @@ import type { IpcErrorCode, StructuredIpcError } from '../../shared/ipc-error'
 import type {
   BatchResult,
   EventLoopMetrics,
+  JarScanResult,
   Jdk,
   JdkValidation,
   McpInfo,
@@ -41,6 +42,7 @@ import type {
 } from '../../shared/types'
 import { ConfigError } from '../config/config-store'
 import type { ConfigStore } from '../config/config-store'
+import { managedJarSet, scanJars } from '../jar/jar-scanner'
 import {
   DEFAULT_SCAN_ROOTS,
   mergeJdks,
@@ -174,6 +176,22 @@ export function registerIpcHandlers(deps: IpcDependencies): void {
   )
 
   register(IPC_REQUESTS.PROJECTS_CREATE, (raw) => store.createProject(S.projectCreateSchema.parse(raw)))
+
+  // ===== projects:scanJars（2026-11-10 扫描导入：递归收集 *.jar + 已纳管标注） =====
+
+  register(IPC_REQUESTS.PROJECTS_SCAN_JARS, async (raw): Promise<JarScanResult> => {
+    const { rootDir } = S.scanJarsSchema.parse(raw)
+    const managed = managedJarSet(store.listProjects().map((p) => p.jarPath))
+    try {
+      return await scanJars(rootDir, managed)
+    } catch (err) {
+      fail(
+        'VALIDATION_ERROR',
+        `目录扫描失败：${err instanceof Error ? err.message : String(err)}`,
+        { rootDir }
+      )
+    }
+  })
 
   register(IPC_REQUESTS.PROJECTS_UPDATE, async (raw) => {
     const input = S.projectUpdateSchema.parse(raw)
@@ -369,10 +387,10 @@ export function registerIpcHandlers(deps: IpcDependencies): void {
   })
 
   register(IPC_REQUESTS.APP_PICK_FILE, async (raw): Promise<string | null> => {
-    const { title, filters } = S.pickFileSchema.parse(raw)
+    const { title, directory, filters } = S.pickFileSchema.parse(raw)
     const result = await dialog.showOpenDialog({
       ...(title !== undefined ? { title } : {}),
-      properties: ['openFile'],
+      properties: directory === true ? ['openDirectory'] : ['openFile'],
       ...(filters !== undefined && filters.length > 0 ? { filters } : {})
     })
     if (result.canceled || result.filePaths.length === 0) return null

@@ -26,6 +26,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import type {
   BatchResult,
+  JarScanResult,
   Jdk,
   OpResult,
   Project,
@@ -35,6 +36,7 @@ import type {
   SearchResult
 } from '../../shared/types'
 import { ConfigError } from '../config/config-store'
+import { managedJarSet, normalizeJarPath } from '../jar/jar-scanner'
 import { JAVAMGR_SERVER_NAME } from './port-probe'
 
 // ---------- 服务面（结构化最小接口；与 ipc-registry 的注入面同构，避免反向依赖 electron） ----------
@@ -80,6 +82,10 @@ export interface McpToolServices {
   }
   processControl: McpProcessControl
   logService: McpLogService
+  /** jar 扫描面（jar-scanner + 已纳管标注；主进程装配层注入适配器，2026-11-10 扫描导入） */
+  jarScanner: {
+    scanJars(rootDir: string): Promise<JarScanResult>
+  }
 }
 
 // ---------- project 参数解析器（§2.6：精确 id → 精确 name → 大小写不敏感 name → 唯一前缀） ----------
@@ -249,13 +255,42 @@ const toolSchemas = {
     confirm: z
       .boolean()
       .describe('运行中项目必须携带 true（先停止进程树再删除）；false 时运行中项目拒绝删除')
+  },
+  scan_jars: {
+    rootDir: z.string().min(1).describe('扫描根目录（绝对路径，递归子目录收集 *.jar）')
+  },
+  batch_create_projects: {
+    projects: z
+      .array(
+        z.object({
+          name: z.string().min(1).describe('项目名称'),
+          jarPath: z.string().min(1).describe('jar 绝对路径（可来自 scan_jars 结果的 path）'),
+          jdkId: z.string().min(1).describe('绑定的 JDK id（可用 list_jdks 查询候选）'),
+          jvmArgs: z.array(z.string()).default([]).describe('JVM 参数，默认空'),
+          programArgs: z.array(z.string()).default([]).describe('程序参数，默认空'),
+          envVars: z
+            .record(z.string(), z.string())
+            .default({})
+            .describe('环境变量，默认空'),
+          logFilePath: z.string().min(1).optional().describe('可选：日志文件路径'),
+          encodingOverride: z.enum(['auto', 'utf8', 'gbk']).optional().describe('可选：stdout 编码覆盖')
+        })
+      )
+      .min(1)
+      .max(200)
+      .describe('批量创建的项目清单（1–200 条，与 GUI「扫描导入」批量纳管等价）'),
+    skipExisting: z
+      .boolean()
+      .default(true)
+      .describe('跳过 jarPath 已被现有项目引用的条目（幂等导入，默认 true）')
   }
 } as const
 
 // ---------- 工具注册 ----------
 
 /**
- * 在 McpServer 实例上注册全部 13 工具（§2.6 原始 7 工具 + 2026-11-10 面板同款补齐 6 工具）。
+ * 在 McpServer 实例上注册全部 15 工具（§2.6 原始 7 工具 + 2026-11-10 面板同款补齐 6 工具
+ * + 扫描导入流程 2 工具 scan_jars/batch_create_projects）。
  * server 实例由调用方构造（mcp-host）或用 {@link createJavamgrMcpServer} 一并构造。
  */
 export function registerMcpTools(server: McpServer, services: McpToolServices): void {
@@ -622,6 +657,91 @@ export function registerMcpTools(server: McpServer, services: McpToolServices): 
     },
     async () => toolResult(await processControl.stopAllProjects())
   )
+
+  // ===== scan_jars（扫描导入第 1 步：递归收集 *.jar，与 GUI「扫描导入」同一服务层） =====
+  server.registerTool(
+    'scan_jars',
+    {
+      title: '扫描目录 jar',
+      description:
+        '递归扫描指定目录下的 *.jar（与 GUI「扫描导入」等价）。返回 {jars:[{path,suggestedName,sizeBytes,mtimeIso,alreadyManaged}],truncated,skippedDirs}；suggestedName 可直接作为 batch_create_projects 的 name，alreadyManaged=true 的条目建议跳过。上限 1000 个（truncated=true 表示截断）。',
+      inputSchema: toolSchemas.scan_jars
+    },
+    async ({ rootDir }) => {
+      try {
+        return toolResult(await services.jarScanner.scanJars(rootDir))
+      } catch (err) {
+        return toolResult(
+          { error: err instanceof Error ? err.message : String(err), rootDir },
+          true
+        )
+      }
+    }
+  )
+
+  // ===== batch_create_projects（扫描导入第 2 步：批量纳管，单项失败不中断） =====
+  server.registerTool(
+    'batch_create_projects',
+    {
+      title: '批量创建项目',
+      description:
+        '批量注册项目（与 GUI「扫描导入」批量纳管等价，典型流程：scan_jars → 组装清单 → 本工具）。逐条校验 jdkId 与 skipExisting（jarPath 已被现有项目引用时默认跳过并计 skipped），单项失败不中断；返回 {created,skipped,failed,results:[{index,name,ok,id?,skipped?,error?}]}。',
+      inputSchema: toolSchemas.batch_create_projects
+    },
+    async ({ projects, skipExisting }) => {
+      const validJdkIds = new Set(store.listJdks().map((j) => j.id))
+      const managed = managedJarSet(store.listProjects().map((p) => p.jarPath))
+      const results: Array<{
+        index: number
+        name: string
+        ok: boolean
+        id?: string
+        skipped?: boolean
+        error?: string
+      }> = []
+      let created = 0
+      let skipped = 0
+      let failed = 0
+      for (const [index, item] of projects.entries()) {
+        if (skipExisting && managed.has(normalizeJarPath(item.jarPath))) {
+          skipped++
+          results.push({ index, name: item.name, ok: true, skipped: true })
+          continue
+        }
+        if (!validJdkIds.has(item.jdkId)) {
+          failed++
+          results.push({ index, name: item.name, ok: false, error: `jdkId「${item.jdkId}」未注册（可用 list_jdks 查询候选）` })
+          continue
+        }
+        try {
+          const project = await store.createProject({
+            name: item.name,
+            jarPath: item.jarPath,
+            jdkId: item.jdkId,
+            jvmArgs: item.jvmArgs,
+            programArgs: item.programArgs,
+            envVars: item.envVars,
+            ...(item.logFilePath !== undefined ? { logFilePath: item.logFilePath } : {}),
+            ...(item.encodingOverride !== undefined
+              ? { encodingOverride: item.encodingOverride }
+              : {})
+          })
+          managed.add(normalizeJarPath(item.jarPath)) // 清单内重复 jarPath 也按已纳管跳过
+          created++
+          results.push({ index, name: item.name, ok: true, id: project.id })
+        } catch (err) {
+          failed++
+          results.push({
+            index,
+            name: item.name,
+            ok: false,
+            error: err instanceof Error ? err.message : String(err)
+          })
+        }
+      }
+      return toolResult({ created, skipped, failed, results }, failed > 0 && created === 0)
+    }
+  )
 }
 
 /**
@@ -636,7 +756,7 @@ export function createJavamgrMcpServer(
     { name: JAVAMGR_SERVER_NAME, version },
     {
       instructions:
-        'Windows Java 进程管理器：纳管预构建 jar 项目的启停/状态/日志，支持新建/编辑/删除项目与全部启动/停止（与 GUI 面板同源等价）。project 参数支持 id、精确名称、大小写不敏感名称或唯一前缀；jdkId 用 list_jdks 查询。'
+        'Windows Java 进程管理器：纳管预构建 jar 项目的启停/状态/日志，支持新建/编辑/删除项目与全部启动/停止（与 GUI 面板同源等价）；批量导入流程：scan_jars 扫描目录 → batch_create_projects 批量纳管。project 参数支持 id、精确名称、大小写不敏感名称或唯一前缀；jdkId 用 list_jdks 查询。'
     }
   )
   registerMcpTools(server, services)

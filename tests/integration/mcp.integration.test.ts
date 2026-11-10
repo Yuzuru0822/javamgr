@@ -12,6 +12,7 @@ import { ConfigStore } from '../../src/main/config/config-store'
 import { resolveAppPaths } from '../../src/main/config/paths'
 import { LogManager } from '../../src/main/log/log-manager'
 import { McpHost } from '../../src/main/mcp/mcp-host'
+import { managedJarSet, scanJars } from '../../src/main/jar/jar-scanner'
 import { ProcessManager } from '../../src/main/process/process-manager'
 import { createTaskOps } from '../../src/main/process/task-killer'
 
@@ -155,10 +156,18 @@ beforeAll(async () => {
     }
   })
 
-  // 3) MCP 宿主（真实 13 工具 + 契约端口策略；注入随机高位端口避免与开发实例 7777 冲突）
+  // 3) MCP 宿主（真实 15 工具 + 契约端口策略；注入随机高位端口避免与开发实例 7777 冲突）
   mcpPort = await getFreePort()
   mcpHost = new McpHost({
-    services: { store, processControl: processManager, logService: logManager },
+    services: {
+      store,
+      processControl: processManager,
+      logService: logManager,
+      jarScanner: {
+        scanJars: (rootDir: string) =>
+          scanJars(rootDir, managedJarSet(store.listProjects().map((p) => p.jarPath)))
+      }
+    },
     portFile: paths.mcpPortFile,
     getPort: () => mcpPort
   })
@@ -202,8 +211,8 @@ async function rmWithRetry(target: string, attempts = 5): Promise<void> {
   }
 }
 
-describe('integration/mcp：HTTP 通道 13 工具端到端（真实服务层 + 夹具 jar）', () => {
-  it('initialize + tools/list：返回 13 工具，serverInfo.name=javamgr（A15）', async () => {
+describe('integration/mcp：HTTP 通道 15 工具端到端（真实服务层 + 夹具 jar）', () => {
+  it('initialize + tools/list：返回 15 工具，serverInfo.name=javamgr（A15）', async () => {
     expect(client.getServerVersion()?.name).toBe('javamgr')
     const result = await client.listTools()
     expect(result.tools.map((t) => t.name).sort()).toEqual(
@@ -220,9 +229,23 @@ describe('integration/mcp：HTTP 通道 13 工具端到端（真实服务层 + �
         'update_project',
         'delete_project',
         'start_all_projects',
-        'stop_all_projects'
+        'stop_all_projects',
+        'scan_jars',
+        'batch_create_projects'
       ].sort()
     )
+  })
+
+  it('scan_jars：真实递归扫描夹具目录，本项目 jar 标注 alreadyManaged=true', async () => {
+    const { payload, isError } = await callTool('scan_jars', { rootDir: FIXTURES_DIR })
+    expect(isError).toBe(false)
+    const jars = payload['jars'] as ToolPayload[]
+    const mine = jars.find(
+      (j) => (j['path'] as string).toLowerCase() === JAR_PATH.toLowerCase()
+    )
+    expect(mine).toBeDefined()
+    expect(mine!['alreadyManaged']).toBe(true) // 夹具项目 jarPath 即 JAR_PATH
+    expect(mine!['suggestedName']).toBe('loggy-mcp')
   })
 
   it('A17/A18 台词链：start（前缀解析）→ RUNNING → read_logs(stdout 路由) → search ERROR → restart → stop → 无残留', async () => {

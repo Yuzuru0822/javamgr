@@ -1,6 +1,6 @@
 {
   "name": "java-process-manager",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Windows Java 进程管理器（Electron + 内嵌 MCP）",
   "main": "./out/main/index.js",
   "author": "javamgr",
