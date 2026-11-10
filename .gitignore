@@ -1,0 +1,10 @@
+node_modules/
+out/
+dist/
+*.log
+.DS_Store
+
+# 夹具编译产物（scripts/fixtures/README.md 说明手工编译；集成测试自动编译到 build*/）
+scripts/fixtures/**/*.class
+scripts/fixtures/**/*.jar
+scripts/fixtures/build*/

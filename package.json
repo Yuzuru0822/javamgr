@@ -1,0 +1,45 @@
+{
+  "name": "java-process-manager",
+  "version": "0.1.1",
+  "description": "Windows Java 进程管理器（Electron + 内嵌 MCP）",
+  "main": "./out/main/index.js",
+  "author": "javamgr",
+  "private": true,
+  "scripts": {
+    "dev": "electron-vite dev",
+    "start": "electron-vite preview",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "build": "npm run typecheck && electron-vite build",
+    "dist": "npm run build && electron-builder --win nsis"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "iconv-lite": "^0.6.3",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "@vitejs/plugin-vue": "^5.1.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^2.3.0",
+    "element-plus": "^2.8.0",
+    "pinia": "^2.2.0",
+    "typescript": "~5.8.3",
+    "vite": "^5.4.0",
+    "vitest": "^3.2.7",
+    "vue": "^3.5.0",
+    "vue-router": "^4.4.0",
+    "vue-tsc": "^2.2.0"
+  },
+  "allowScripts": {
+    "electron": true,
+    "esbuild": true,
+    "vue-demi": true
+  }
+}

@@ -1,0 +1,32 @@
+# electron-builder 打包配置（计划 §2.2 / §3 S6.3 定稿）
+# 产物：NSIS 安装包（非 oneClick，允许选目录）+ 版本号 artifactName。
+# 无图标资产：不配置 icon 字段，使用 electron-builder 默认图标（S6 未提供 .ico，
+# 配置不存在的 icon 路径会直接构建失败，故显式省略）。
+appId: com.javamgr.app
+productName: javamgr
+directories:
+  buildResources: build
+  output: dist
+files:
+  - out/**
+  - package.json
+  - "!**/*.map"
+# asar 打包（默认开启）保留：主进程代码经 fs 访问的都是 userData（运行时生成），
+# 不读取 app 包内相对资源，asar 无碍
+asar: true
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  # 未配置 icon：使用默认图标
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: javamgr
+  artifactName: ${productName}-${version}-${arch}-setup.${ext}
+# 便携目录产物（win-unpacked）随 nsis 构建自动生成于 dist/win-unpacked，
+# 供无安装场景冒烟使用
