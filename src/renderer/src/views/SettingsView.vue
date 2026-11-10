@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { EventLoopMetrics, McpInfo } from '@shared/types'
+import type { EventLoopMetrics, McpInfo, UpdaterStatus } from '@shared/types'
 import { ipc, ipcEvents } from '@renderer/api/ipc'
 import { useSettingsStore } from '@renderer/stores/settings'
 
@@ -338,9 +338,75 @@ const mcpStatusLabel = computed(() => {
   return { text: '启动失败', type: 'danger' as const }
 })
 
+// ==================== 自动更新（v0.4.0：GitHub Releases） ====================
+
+const appVersion = ref('')
+const updater = ref<UpdaterStatus>({ state: 'idle' })
+
+async function checkUpdate(): Promise<void> {
+  try {
+    updater.value = await ipc.app.checkUpdate()
+  } catch (err) {
+    updater.value = { state: 'error', error: errText(err) }
+  }
+}
+
+/** 立即重启安装前的确认：明示退出策略对托管进程的影响（keep 存活重识别 / stopAll 全停） */
+async function installUpdateNow(): Promise<void> {
+  const stopAll = settingsStore.settings?.exitPolicy === 'stopAll'
+  const confirmed = await ElMessageBox.confirm(
+    stopAll
+      ? '当前退出策略为「退出时全部停止」：安装将停止全部托管项目后再重启为新版。确定继续吗？'
+      : '安装将重启管理器；托管的 java 进程保持运行，新版启动后自动重识别（业务不中断）。确定继续吗？',
+    '重启安装更新',
+    { confirmButtonText: '重启安装', cancelButtonText: '稍后', type: stopAll ? 'warning' : 'info' }
+  )
+    .then(() => true)
+    .catch(() => false)
+  if (!confirmed) return
+  try {
+    await ipc.app.installUpdateNow()
+  } catch (err) {
+    ElMessage.error(`触发安装失败：${errText(err)}`)
+  }
+}
+
+/** 字节数人性化（下载进度展示） */
+function formatBytes(bytes: number | undefined): string {
+  if (bytes === undefined) return ''
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${bytes} B`
+}
+
+const updaterStatusText = computed(() => {
+  const s = updater.value
+  switch (s.state) {
+    case 'idle':
+      return '未检查'
+    case 'checking':
+      return '正在检查更新…'
+    case 'available':
+      return `发现新版本 v${s.version ?? '?'}，开始下载…`
+    case 'downloading':
+      return `正在下载 v${s.version ?? ''}（${formatBytes(s.transferred)}/${formatBytes(s.total)}，${formatBytes(s.bytesPerSecond)}/s）`
+    case 'downloaded':
+      return `v${s.version ?? ''} 已下载完成，可立即安装`
+    case 'not-available':
+      return `已是最新版本（v${s.version ?? appVersion.value}）`
+    case 'error':
+      return `更新失败：${s.error ?? '未知错误'}`
+  }
+})
+
+const updaterBusy = computed(
+  () => updater.value.state === 'checking' || updater.value.state === 'downloading'
+)
+
 // ==================== 生命周期 ====================
 
 let unsubscribePortChanged: (() => void) | null = null
+let unsubscribeUpdaterStatus: (() => void) | null = null
 
 onMounted(async () => {
   if (!settingsStore.loaded) await settingsStore.load()
@@ -350,6 +416,22 @@ onMounted(async () => {
     void refreshMcpInfo()
     syncFromStore() // 端口/开关可能经其他入口变更，同步全量镜像
   })
+  ipc.app
+    .getVersion()
+    .then((v) => {
+      appVersion.value = v
+    })
+    .catch(() => {})
+  // 重开设置页恢复下载进度（更新在后台持续）
+  ipc.app
+    .getUpdaterState()
+    .then((s) => {
+      updater.value = s
+    })
+    .catch(() => {})
+  unsubscribeUpdaterStatus = ipcEvents.updaterStatus((status) => {
+    updater.value = status
+  })
   await refreshEventLoop()
   eventLoopTimer = setInterval(() => void refreshEventLoop(), 3_000)
 })
@@ -357,6 +439,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   unsubscribePortChanged?.()
   unsubscribePortChanged = null
+  unsubscribeUpdaterStatus?.()
+  unsubscribeUpdaterStatus = null
   if (eventLoopTimer !== null) {
     clearInterval(eventLoopTimer)
     eventLoopTimer = null
@@ -455,6 +539,53 @@ onBeforeUnmount(() => {
           </div>
           <pre class="sample-json">{{ stdioSample }}</pre>
         </div>
+      </div>
+    </el-card>
+
+    <el-card shadow="never" class="block-card">
+      <template #header>
+        <div class="card-header">
+          <span>软件更新</span>
+          <el-tag size="small" :type="updater.state === 'error' ? 'danger' : 'info'">
+            v{{ appVersion === '' ? '—' : appVersion }}
+          </el-tag>
+        </div>
+      </template>
+
+      <div class="update-row">
+        <el-button
+          type="primary"
+          :loading="updaterBusy"
+          :disabled="updater.state === 'downloaded'"
+          @click="checkUpdate"
+        >
+          检查更新
+        </el-button>
+        <span class="update-status">{{ updaterStatusText }}</span>
+        <template v-if="updater.state === 'downloaded'">
+          <el-button type="success" @click="installUpdateNow">立即重启安装</el-button>
+          <span class="field-hint update-later">稍后 = 下次退出时自动安装，再启动即为新版</span>
+        </template>
+        <el-button
+          v-if="updater.state === 'error'"
+          plain
+          :disabled="updaterBusy"
+          @click="checkUpdate"
+        >
+          重试
+        </el-button>
+      </div>
+
+      <el-progress
+        v-if="updater.state === 'downloading'"
+        :percentage="Math.min(100, Math.round(updater.percent ?? 0))"
+        :stroke-width="10"
+        class="update-progress"
+      />
+
+      <div class="field-hint">
+        更新源为 GitHub Releases（差量下载，仅传输变化部分）。发现新版后自动下载；
+        安装重启时托管的 java 进程按退出策略处理（默认保持运行，新版启动后自动重识别）。
       </div>
     </el-card>
 
@@ -731,5 +862,25 @@ onBeforeUnmount(() => {
 
 .perf-desc {
   margin-bottom: 8px;
+}
+
+.update-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.update-status {
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+}
+
+.update-progress {
+  margin: 12px 0 4px;
+}
+
+.update-later {
+  margin-top: 0;
 }
 </style>

@@ -300,6 +300,35 @@ export interface JarScanResult {
   skippedDirs: string[]
 }
 
+// ---------- 自动更新（updater:* / v0.4.0） ----------
+
+/** 更新流程状态机：idle → checking → available（自动进入 downloading）→ downloaded；无新版 → not-available；任一步失败 → error */
+export type UpdaterState =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'downloading'
+  | 'downloaded'
+  | 'not-available'
+  | 'error'
+
+/** updater:check 请求返回 + updater:status 事件载荷（设置页更新区块全量状态） */
+export interface UpdaterStatus {
+  state: UpdaterState
+  /** 远端版本（available/downloading/downloaded/not-available）；checking/error 可省略 */
+  version?: string
+  /** downloading：0–100 */
+  percent?: number
+  /** downloading：已传输字节 */
+  transferred?: number
+  /** downloading：总字节 */
+  total?: number
+  /** downloading：字节/秒 */
+  bytesPerSecond?: number
+  /** error：可展示原因（网络失败/校验失败等） */
+  error?: string
+}
+
 // ---------- runs.json（S3 pid-registry 落盘契约，S0 先定形） ----------
 
 /** 单次运行记录：工具重启后按 PID + 启动时间重识别 */

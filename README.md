@@ -63,6 +63,21 @@ node scripts/packaged-smoke.mjs            # 默认 dist/win-unpacked
 node scripts/packaged-smoke.mjs <目录>      # 指定 win-unpacked 目录
 ```
 
+## 自动更新与发版（v0.4.0，GitHub Releases）
+
+设置页「软件更新」→ 检查更新：拉取 Release 资产中的 `latest.yml` 与当前版本比对 → 发现新版**自动差量下载**（按 `.blockmap` 只传变化块）→「立即重启安装」静默装新版并自启（或稍后 = 下次退出时自动安装）。安装重启走退出策略：keep 下托管 java 子进程存活，新版启动后按 runs.json 重识别——更新过程业务零中断。更新源配置在 `electron-builder.yml` 的 `publish`（构建时写入产物 `app-update.yml`）。
+
+发版（仓库须为 public——更新器匿名拉取，不内嵌 token）：
+
+```bash
+npm run dist
+gh release create v<version> \
+  dist/javamgr-<version>-x64-setup.exe \
+  dist/javamgr-<version>-x64-setup.exe.blockmap \
+  dist/latest.yml \
+  --title "javamgr v<version>" --notes "..."
+```
+
 ## Agent 接入（MCP）
 
 15 个工具，与 GUI 面板同源等价：

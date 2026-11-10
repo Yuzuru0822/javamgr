@@ -38,7 +38,8 @@ import type {
   ReadHistoryResult,
   ScanProgressEvent,
   SearchParams,
-  SearchResult
+  SearchResult,
+  UpdaterStatus
 } from '../../shared/types'
 import { ConfigError } from '../config/config-store'
 import type { ConfigStore } from '../config/config-store'
@@ -81,6 +82,12 @@ export interface IpcDependencies {
   mcpStatus?: { getMcpStatus(): McpHostStatus }
   /** N-6 事件循环打点（index.ts 注入 EventLoopMonitor；缺省返回零值指标） */
   eventLoop?: { getMetrics(): EventLoopMetrics }
+  /** v0.4.0 自动更新（index.ts 注入 UpdaterHost；缺省通道显式报错） */
+  updater?: {
+    check(): UpdaterStatus
+    installNow(): void
+    getState(): UpdaterStatus
+  }
 }
 
 // ---------- S4 注入点：日志服务 ----------
@@ -385,6 +392,25 @@ export function registerIpcHandlers(deps: IpcDependencies): void {
       ...(status?.occupantName !== undefined ? { occupantName: status.occupantName } : {})
     }
   })
+
+  // ===== v0.4.0：自动更新（GitHub Releases；状态经 updater:status 事件推送） =====
+
+  const requireUpdater = (channel: string): NonNullable<IpcDependencies['updater']> => {
+    if (!deps.updater) {
+      fail('NOT_IMPLEMENTED', `通道 ${channel} 不可用：主进程未装配更新器（updater 缺失）`)
+    }
+    return deps.updater
+  }
+
+  register(IPC_REQUESTS.UPDATER_CHECK, () => requireUpdater(IPC_REQUESTS.UPDATER_CHECK).check())
+
+  register(IPC_REQUESTS.UPDATER_INSTALL_NOW, () =>
+    requireUpdater(IPC_REQUESTS.UPDATER_INSTALL_NOW).installNow()
+  )
+
+  register(IPC_REQUESTS.UPDATER_GET_STATE, (): UpdaterStatus =>
+    deps.updater?.getState() ?? { state: 'error', error: '更新模块未装配' }
+  )
 
   register(IPC_REQUESTS.APP_PICK_FILE, async (raw): Promise<string | null> => {
     const { title, directory, filters } = S.pickFileSchema.parse(raw)

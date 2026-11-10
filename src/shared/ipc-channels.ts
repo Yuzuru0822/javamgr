@@ -52,11 +52,17 @@ export const IPC_REQUESTS = {
   /** — | EventLoopMetrics（N-6：主进程 event loop 简易打点，设置页查看） */
   APP_GET_EVENT_LOOP_METRICS: 'app:getEventLoopMetrics',
   /**
-   * {title?, filters?: Array<{name, extensions: string[]}>} | string | null
+   * {title?, directory?, filters?: Array<{name, extensions: string[]}>} | string | null
    * S3 新增（计划 §2.4 ProjectForm"jar 路径(文件选择器)"所需的最小通道）：
    * 主进程 dialog.showOpenDialog 包装，渲染进程无 Node 能力故经 IPC。
    */
-  APP_PICK_FILE: 'app:pickFile'
+  APP_PICK_FILE: 'app:pickFile',
+  /** — | UpdaterStatus（v0.4.0：触发检查更新；后续状态经 updater:status 事件推送） */
+  UPDATER_CHECK: 'updater:check',
+  /** — | void（下载完成后立即重启静默安装；主进程随即退出，返回值仅为通道契约占位） */
+  UPDATER_INSTALL_NOW: 'updater:installNow',
+  /** — | UpdaterStatus（当前更新状态快照：重开设置页时恢复下载进度等） */
+  UPDATER_GET_STATE: 'updater:getState'
 } as const
 
 export const IPC_EVENTS = {
@@ -67,7 +73,9 @@ export const IPC_EVENTS = {
   /** {scanned, found} */
   JDK_SCAN_PROGRESS: 'jdk:scanProgress',
   /** {port, reason: "user-changed"|"bind-failed"}（bind-failed 携带占用进程名） */
-  MCP_PORT_CHANGED: 'mcp:portChanged'
+  MCP_PORT_CHANGED: 'mcp:portChanged',
+  /** UpdaterStatus（v0.4.0：检查中/发现新版/下载进度/已下载/无新版/失败 全状态推送） */
+  UPDATER_STATUS: 'updater:status'
 } as const
 
 export type IpcRequestChannel = (typeof IPC_REQUESTS)[keyof typeof IPC_REQUESTS]

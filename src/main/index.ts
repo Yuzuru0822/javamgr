@@ -12,6 +12,7 @@ import { McpHost } from './mcp/mcp-host'
 import { runBridge } from './mcp/run-bridge'
 import { prepareExit } from './lifecycle'
 import { createTray, mcpTrayTooltip } from './tray'
+import { UpdaterHost } from './updater'
 import { EventLoopMonitor } from './telemetry/event-loop-monitor'
 import { IPC_EVENTS } from '../shared/ipc-channels'
 import type { Settings } from '../shared/types'
@@ -153,6 +154,13 @@ function startMainMode(): void {
     const eventLoopMonitor = new EventLoopMonitor()
     eventLoopMonitor.start()
 
+    // v0.4.0：自动更新宿主（GitHub Releases；全状态广播 updater:status，
+    // 渲染端重开设置页经 updater:getState 恢复进度）
+    const updaterHost = new UpdaterHost({
+      isPackaged: app.isPackaged,
+      onStatus: (status) => broadcastEvent(IPC_EVENTS.UPDATER_STATUS, status)
+    })
+
     // S4：日志系统（先建，process-manager 广播需同时喂给它做终态 flush）
     const logManager = new LogManager({
       store,
@@ -220,7 +228,8 @@ function startMainMode(): void {
       },
       logService: logManager,
       mcpStatus: mcpHost,
-      eventLoop: eventLoopMonitor
+      eventLoop: eventLoopMonitor,
+      updater: updaterHost
     })
 
     createWindow()

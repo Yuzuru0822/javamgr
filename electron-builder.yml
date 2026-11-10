@@ -28,5 +28,13 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: javamgr
   artifactName: ${productName}-${version}-${arch}-setup.${ext}
+# 自动更新（v0.4.0）：GitHub Releases 为更新源——构建时把该配置写入产物
+# resources/app-update.yml，electron-updater 运行时据此构造 latest.yml/资产
+# 下载地址（仓库须为 public：匿名拉取，不在客户端内嵌 token）。
+# 发版 = gh release create v<version> 上传 setup.exe + .blockmap + latest.yml 三件套。
+publish:
+  provider: github
+  owner: Yuzuru0822
+  repo: javamgr
 # 便携目录产物（win-unpacked）随 nsis 构建自动生成于 dist/win-unpacked，
 # 供无安装场景冒烟使用

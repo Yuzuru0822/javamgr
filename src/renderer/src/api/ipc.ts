@@ -20,7 +20,8 @@ import type {
   SearchParams,
   SearchResult,
   Settings,
-  StatusChangedEvent
+  StatusChangedEvent,
+  UpdaterStatus
 } from '@shared/types'
 import type { IpcRequestChannel } from '@shared/ipc-channels'
 
@@ -114,7 +115,14 @@ export const ipc = {
       title?: string
       directory?: boolean
       filters?: Array<{ name: string; extensions: string[] }>
-    }): Promise<string | null> => invoke<string | null>(IPC_REQUESTS.APP_PICK_FILE, params ?? {})
+    }): Promise<string | null> => invoke<string | null>(IPC_REQUESTS.APP_PICK_FILE, params ?? {}),
+    /** v0.4.0 自动更新：触发检查（后续状态经 updaterStatus 事件推送） */
+    checkUpdate: (): Promise<UpdaterStatus> => invoke<UpdaterStatus>(IPC_REQUESTS.UPDATER_CHECK),
+    /** 下载完成后立即重启静默安装（主进程随即退出） */
+    installUpdateNow: (): Promise<void> => invoke<void>(IPC_REQUESTS.UPDATER_INSTALL_NOW),
+    /** 当前更新状态快照（重开设置页恢复下载进度等） */
+    getUpdaterState: (): Promise<UpdaterStatus> =>
+      invoke<UpdaterStatus>(IPC_REQUESTS.UPDATER_GET_STATE)
   }
 } as const
 
@@ -127,5 +135,7 @@ export const ipcEvents = {
   scanProgress: (listener: (payload: ScanProgressEvent) => void): (() => void) =>
     window.api.on<ScanProgressEvent>(IPC_EVENTS.JDK_SCAN_PROGRESS, listener),
   portChanged: (listener: (payload: PortChangedEvent) => void): (() => void) =>
-    window.api.on<PortChangedEvent>(IPC_EVENTS.MCP_PORT_CHANGED, listener)
+    window.api.on<PortChangedEvent>(IPC_EVENTS.MCP_PORT_CHANGED, listener),
+  updaterStatus: (listener: (payload: UpdaterStatus) => void): (() => void) =>
+    window.api.on<UpdaterStatus>(IPC_EVENTS.UPDATER_STATUS, listener)
 } as const
