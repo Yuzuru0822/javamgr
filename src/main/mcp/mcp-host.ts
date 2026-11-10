@@ -62,6 +62,8 @@ export interface McpHostOptions {
   portFile: string
   /** 契约端口来源（settings.mcpPort；默认值 7777 已在 config-store DEFAULT_SETTINGS 拥有） */
   getPort: () => number
+  /** serverInfo.version（装配层注入 app.getVersion()；缺省 0.1.0） */
+  version?: string
   /** mcp:portChanged 广播通道（装配层接 webContents.send） */
   onPortChanged?: (payload: PortChangedEvent) => void
   /** MCP initialize 探测（默认真实 HTTP 探测；单测注入 fake） */
@@ -70,7 +72,7 @@ export interface McpHostOptions {
   runner?: CommandRunner
   /** 残留实例终止（默认 taskkill /T /F；单测注入可真实释放端口的 fake） */
   killOccupant?: (pid: number) => Promise<boolean>
-  /** server 工厂（默认 createJavamgrMcpServer(services)；单测可换假 server） */
+  /** server 工厂（默认 createJavamgrMcpServer(services, version)；单测可换假 server） */
   makeServer?: () => McpServer
 }
 
@@ -84,6 +86,7 @@ export class McpHost {
   private readonly services: McpToolServices
   private readonly portFile: string
   private readonly getPort: () => number
+  private readonly version: string
   private readonly onPortChanged?: (payload: PortChangedEvent) => void
   private readonly probe: PortProbe
   private readonly runner?: CommandRunner
@@ -97,12 +100,14 @@ export class McpHost {
     this.services = opts.services
     this.portFile = opts.portFile
     this.getPort = opts.getPort
+    this.version = opts.version ?? '0.1.0'
     this.onPortChanged = opts.onPortChanged
     this.probe = opts.probe ?? probeJavamgrServer
     this.runner = opts.runner
     this.killOccupant =
       opts.killOccupant ?? ((pid: number) => killPid(pid, this.runner))
-    this.makeServer = opts.makeServer ?? (() => createJavamgrMcpServer(this.services))
+    this.makeServer =
+      opts.makeServer ?? (() => createJavamgrMcpServer(this.services, this.version))
   }
 
   /** 当前状态快照（IPC app:getMcpInfo 与设置页展示同源） */

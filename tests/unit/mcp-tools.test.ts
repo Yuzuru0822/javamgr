@@ -3,14 +3,17 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import type {
+  BatchResult,
   OpResult,
   Project,
+  ProjectInput,
   ProjectRuntimeState,
   ReadHistoryParams,
   ReadHistoryResult,
   SearchParams,
   SearchResult
 } from '../../src/shared/types'
+import { ConfigError } from '../../src/main/config/config-store'
 import { createJavamgrMcpServer } from '../../src/main/mcp/tools'
 import { resolveProject } from '../../src/main/mcp/tools'
 import type { McpToolServices } from '../../src/main/mcp/tools'
@@ -18,8 +21,9 @@ import type { McpToolServices } from '../../src/main/mcp/tools'
 /**
  * MCP 工具层单测（计划 §2.6 / §3 S5.1，A17 的映射部分）：
  * - project 参数解析器：id / 精确 name / 大小写不敏感 / 唯一前缀 / 歧义候选 / 未命中候选列表；
- * - 7 工具经 SDK Client + InMemoryTransport 全链路（zod 校验 + 默认值 + 出入参映射），
+ * - 工具经 SDK Client + InMemoryTransport 全链路（zod 校验 + 默认值 + 出入参映射），
  *   服务层全部 mock——验证"透传同源"：handler 只做解析与转发，幂等语义由服务层拥有（透传即正确）。
+ * - 2026-11-10 面板同款补齐工具：create/update/delete_project、start/stop_all、list_jdks。
  * 真实服务层 + 夹具 jar 的 HTTP 端到端在 tests/integration/mcp.integration.test.ts。
  */
 
@@ -61,14 +65,41 @@ const opCalls: string[] = []
 const readCalls: ReadHistoryParams[] = []
 const searchCalls: SearchParams[] = []
 const runtimeStates = new Map<string, ProjectRuntimeState>()
+const batchCalls: string[] = []
+const switchRouteCalls: string[] = []
+const createInputs: ProjectInput[] = []
+const updateInputs: Array<ProjectInput & { id: string }> = []
+/** store mock 的内存库（独立于夹具常量，create/delete 用例可安全变更） */
+const db: Project[] = structuredClone(projects)
+let idSeq = 0
 
 const services: McpToolServices = {
   store: {
-    listProjects: () => projects,
+    listProjects: () => db,
     listJdks: () => [
       { id: 'jdk-17', name: 'Temurin 17', homePath: 'D:\\java17', version: '17', vendor: 'Temurin', source: 'manual' },
       { id: 'jdk-8', name: 'Temurin 8', homePath: 'D:\\java8', version: '8', vendor: 'Temurin', source: 'manual' }
-    ]
+    ],
+    createProject: async (input) => {
+      createInputs.push(input)
+      const project: Project = { ...input, id: `id-gen-${++idSeq}` }
+      db.push(project)
+      return project
+    },
+    updateProject: async (input) => {
+      updateInputs.push(input)
+      const index = db.findIndex((p) => p.id === input.id)
+      if (index === -1) throw new ConfigError('NOT_FOUND', `项目不存在：${input.id}`)
+      const updated: Project = { ...input }
+      db[index] = updated
+      return updated
+    },
+    deleteProject: async (id) => {
+      const index = db.findIndex((p) => p.id === id)
+      if (index === -1) throw new ConfigError('NOT_FOUND', `项目不存在：${id}`)
+      const [removed] = db.splice(index, 1)
+      return removed
+    }
   },
   processControl: {
     getRuntimeState: (id) => runtimeStates.get(id),
@@ -83,6 +114,14 @@ const services: McpToolServices = {
     restartProject: async (id, stopTimeoutMs) => {
       opCalls.push(`restart:${id}:${stopTimeoutMs}`)
       return { ok: true, pid: 8765 }
+    },
+    startAllProjects: async (): Promise<BatchResult> => {
+      batchCalls.push('startAll')
+      return { results: [{ id: 'id-loggy', ok: true }, { id: 'id-order', ok: false, error: 'JDK 缺失' }] }
+    },
+    stopAllProjects: async (): Promise<BatchResult> => {
+      batchCalls.push('stopAll')
+      return { results: [{ id: 'id-loggy', ok: true }] }
     }
   },
   logService: {
@@ -93,6 +132,9 @@ const services: McpToolServices = {
     search: async (params) => {
       searchCalls.push(params)
       return { matches: [{ lineNo: 3, text: 'boom' }], truncated: false }
+    },
+    switchRoute: (projectId) => {
+      switchRouteCalls.push(projectId)
     }
   }
 }
@@ -173,9 +215,9 @@ describe('mcp/resolveProject：§2.6 解析链', () => {
   })
 })
 
-// ---------- tools/list：7 工具契约 ----------
+// ---------- tools/list：13 工具契约 ----------
 
-describe('mcp/tools：tools/list 返回 7 工具（§2.6）', () => {
+describe('mcp/tools：tools/list 返回 13 工具（§2.6 原始 7 + 面板同款补齐 6）', () => {
   it('工具名与数量精确匹配', async () => {
     const result = await client.listTools()
     expect(result.tools.map((t) => t.name).sort()).toEqual(
@@ -186,7 +228,13 @@ describe('mcp/tools：tools/list 返回 7 工具（§2.6）', () => {
         'stop_project',
         'restart_project',
         'read_logs',
-        'search_logs'
+        'search_logs',
+        'list_jdks',
+        'create_project',
+        'update_project',
+        'delete_project',
+        'start_all_projects',
+        'stop_all_projects'
       ].sort()
     )
   })
@@ -196,11 +244,21 @@ describe('mcp/tools：tools/list 返回 7 工具（§2.6）', () => {
     const serverVersion = client.getServerVersion()
     expect(serverVersion?.name).toBe('javamgr')
   })
+
+  it('serverInfo.version 取注入值（装配层传 app.getVersion()）', async () => {
+    const server = createJavamgrMcpServer(services, '9.9.9-test')
+    const [c, s] = InMemoryTransport.createLinkedPair()
+    const local = new Client({ name: 'version-client', version: '1.0' }, { capabilities: {} })
+    await Promise.all([local.connect(c), server.connect(s)])
+    expect(local.getServerVersion()).toMatchObject({ name: 'javamgr', version: '9.9.9-test' })
+    await local.close()
+    await server.close()
+  })
 })
 
 // ---------- 各工具出入参映射 ----------
 
-describe('mcp/tools：7 工具 handler 映射与透传', () => {
+describe('mcp/tools：原始 7 工具 handler 映射与透传', () => {
   it('list_projects：拼装状态/jdkName/uptime（无状态项目默认 STOPPED）', async () => {
     runtimeStates.set('id-loggy', {
       status: 'RUNNING',
@@ -355,6 +413,163 @@ describe('mcp/tools：7 工具 handler 映射与透传', () => {
     })
     await local.close()
     await server.close()
+  })
+})
+
+// ---------- 面板同款补齐工具（2026-11-10：create/update/delete、start/stop_all、list_jdks） ----------
+
+describe('mcp/tools：面板同款补齐工具', () => {
+  it('list_jdks：返回全部 JDK 字段（create/update 的 jdkId 候选来源）', async () => {
+    const { payload, isError } = await callTool('list_jdks')
+    expect(isError).toBe(false)
+    expect(payload['jdks']).toEqual([
+      expect.objectContaining({ id: 'jdk-17', name: 'Temurin 17', version: '17' }),
+      expect.objectContaining({ id: 'jdk-8', name: 'Temurin 8' })
+    ])
+  })
+
+  it('create_project：必填校验 + 数组/记录默认空 + 返回生成的 id', async () => {
+    const { payload, isError } = await callTool('create_project', {
+      name: 'NewSvc',
+      jarPath: 'D:\\jars\\new.jar',
+      jdkId: 'jdk-17'
+    })
+    expect(isError).toBe(false)
+    expect(payload['created']).toMatchObject({
+      name: 'NewSvc',
+      jarPath: 'D:\\jars\\new.jar',
+      jdkId: 'jdk-17',
+      jvmArgs: [],
+      programArgs: [],
+      envVars: {}
+    })
+    expect(typeof payload['created']['id']).toBe('string')
+    // 生效：新项目可被 list_projects / 前缀解析命中
+    const list = await callTool('list_projects')
+    expect(
+      (list.payload['projects'] as ToolPayload[]).some((p) => p['name'] === 'NewSvc')
+    ).toBe(true)
+  })
+
+  it('create_project：可选字段透传（logFilePath/envVars）', async () => {
+    await callTool('create_project', {
+      name: 'FileLogSvc',
+      jarPath: 'D:\\jars\\f.jar',
+      jdkId: 'jdk-8',
+      envVars: { APP_ENV: 'test' },
+      logFilePath: 'D:\\logs\\f.log',
+      encodingOverride: 'gbk'
+    })
+    expect(createInputs.at(-1)).toMatchObject({
+      name: 'FileLogSvc',
+      jdkId: 'jdk-8',
+      envVars: { APP_ENV: 'test' },
+      logFilePath: 'D:\\logs\\f.log',
+      encodingOverride: 'gbk'
+    })
+  })
+
+  it('create_project：未注册 jdkId → isError 且错误含 JDK 候选列表', async () => {
+    const { payload, isError } = await callTool('create_project', {
+      name: 'Bad',
+      jarPath: 'D:\\jars\\bad.jar',
+      jdkId: 'jdk-missing'
+    })
+    expect(isError).toBe(true)
+    expect(payload['error']).toContain('jdk-missing')
+    expect(payload['error']).toContain('jdk-17')
+    expect(createInputs.every((i) => i.name !== 'Bad')).toBe(true) // 未落库
+  })
+
+  it('update_project：部分更新缺省沿用现值（整体替换语义的参数装配）', async () => {
+    const before = structuredClone(db.find((p) => p.id === 'id-loggy'))
+    const { payload, isError } = await callTool('update_project', {
+      project: 'loggy',
+      jvmArgs: ['-Xmx1g']
+    })
+    expect(isError).toBe(false)
+    expect(updateInputs.at(-1)).toMatchObject({
+      id: 'id-loggy',
+      name: before?.name,
+      jarPath: before?.jarPath,
+      jdkId: before?.jdkId,
+      jvmArgs: ['-Xmx1g'],
+      programArgs: [],
+      envVars: {}
+    })
+    expect(payload['updated']).toMatchObject({ id: 'id-loggy', jvmArgs: ['-Xmx1g'] })
+  })
+
+  it('update_project：logFilePath 变更触发 switchRoute；同值再改不触发', async () => {
+    const routesBefore = switchRouteCalls.length
+    await callTool('update_project', { project: 'id-loggy', logFilePath: 'D:\\logs\\app.log' })
+    expect(updateInputs.at(-1)).toMatchObject({ logFilePath: 'D:\\logs\\app.log' })
+    expect(switchRouteCalls.length).toBe(routesBefore + 1)
+    expect(switchRouteCalls.at(-1)).toBe('id-loggy')
+
+    await callTool('update_project', { project: 'id-loggy', logFilePath: 'D:\\logs\\app.log' })
+    expect(switchRouteCalls.length).toBe(routesBefore + 1) // 未变更不触发
+  })
+
+  it('update_project：logFilePath=null 清除可选字段（改走 stdout 捕获）', async () => {
+    const { payload, isError } = await callTool('update_project', {
+      project: 'id-loggy',
+      logFilePath: null
+    })
+    expect(isError).toBe(false)
+    expect(payload['updated']['logFilePath']).toBeUndefined()
+  })
+
+  it('update_project：非法 jdkId → isError 含候选；未知项目 → isError', async () => {
+    const badJdk = await callTool('update_project', { project: 'loggy', jdkId: 'jdk-missing' })
+    expect(badJdk.isError).toBe(true)
+    expect(badJdk.payload['error']).toContain('jdk-missing')
+
+    const miss = await callTool('update_project', { project: 'nope', name: 'X' })
+    expect(miss.isError).toBe(true)
+    expect(miss.payload['error']).toContain('未找到')
+  })
+
+  it('delete_project：已停止项目直接删除并返回被删配置', async () => {
+    runtimeStates.delete('id-order')
+    const { payload, isError } = await callTool('delete_project', {
+      project: 'order-service',
+      confirm: false
+    })
+    expect(isError).toBe(false)
+    expect(payload['deleted']).toMatchObject({ id: 'id-order', name: 'order-service' })
+    expect(db.some((p) => p.id === 'id-order')).toBe(false)
+  })
+
+  it('delete_project：运行中 + confirm=false 拒绝（不 stop 不删）；confirm=true 先 stop 再删', async () => {
+    runtimeStates.set('id-legacy', { status: 'RUNNING', pid: 999 })
+    const refuse = await callTool('delete_project', { project: 'OrderBackup', confirm: false })
+    expect(refuse.isError).toBe(true)
+    expect(refuse.payload['error']).toContain('confirm=true')
+    expect(db.some((p) => p.id === 'id-legacy')).toBe(true)
+    expect(opCalls).not.toContain('stop:id-legacy:undefined')
+
+    const ok = await callTool('delete_project', { project: 'OrderBackup', confirm: true })
+    expect(ok.isError).toBe(false)
+    expect(ok.payload['deleted']).toMatchObject({ id: 'id-legacy' })
+    expect(opCalls).toContain('stop:id-legacy:undefined') // 默认超时透传（服务层默认 8000）
+    expect(db.some((p) => p.id === 'id-legacy')).toBe(false)
+    runtimeStates.delete('id-legacy')
+  })
+
+  it('start_all_projects / stop_all_projects：无参透传 BatchResult 汇总', async () => {
+    const start = await callTool('start_all_projects')
+    expect(start.isError).toBe(false)
+    expect(start.payload).toEqual({
+      results: [
+        { id: 'id-loggy', ok: true },
+        { id: 'id-order', ok: false, error: 'JDK 缺失' }
+      ]
+    })
+    const stop = await callTool('stop_all_projects')
+    expect(stop.isError).toBe(false)
+    expect(stop.payload).toEqual({ results: [{ id: 'id-loggy', ok: true }] })
+    expect(batchCalls).toEqual(['startAll', 'stopAll'])
   })
 })
 

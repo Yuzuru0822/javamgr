@@ -346,6 +346,9 @@ export function registerIpcHandlers(deps: IpcDependencies): void {
     )
   })
 
+  // ===== N-7：应用版本（项目面板页头展示；开发期 = package.json，打包后 = 安装包版本） =====
+  register(IPC_REQUESTS.APP_GET_VERSION, () => app.getVersion())
+
   register(IPC_REQUESTS.APP_GET_MCP_INFO, (): McpInfo => {
     const settings = store.getSettings()
     // S5：真实监听状态（mcp-host 注入；enabled=实际监听中，端口被占时显式携带错误与占用进程名）

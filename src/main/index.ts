@@ -188,6 +188,7 @@ function startMainMode(): void {
       },
       portFile: getPaths().mcpPortFile,
       getPort: () => store.getSettings().mcpPort,
+      version: app.getVersion(), // serverInfo.version 与 GUI 页头版本同源
       onPortChanged: (payload) => {
         broadcastEvent(IPC_EVENTS.MCP_PORT_CHANGED, payload)
         // S6.2：bind-failed 在托盘显式呈现（tooltip + 气泡通知，绝不静默漂移 R4/A15）

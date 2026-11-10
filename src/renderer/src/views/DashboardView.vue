@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import type { ProjectWithRuntime } from '@shared/types'
 import { useProjectsStore } from '@renderer/stores/projects'
 import { useJdksStore } from '@renderer/stores/jdks'
+import { ipc } from '@renderer/api/ipc'
 import ProjectCard from '@renderer/components/ProjectCard.vue'
 import ProjectForm from '@renderer/components/ProjectForm.vue'
 import LogViewer from '@renderer/components/LogViewer.vue'
@@ -21,6 +22,9 @@ const errText = (err: unknown): string => (err instanceof Error ? err.message : 
 // ---------- uptime 秒级 tick（RUNNING 卡片共用一个时钟） ----------
 const now = ref(Date.now())
 let tickTimer: ReturnType<typeof setInterval> | null = null
+
+// ---------- 系统版本号（页头右上角；失败静默留空，不阻塞面板） ----------
+const appVersion = ref('')
 
 // ---------- 表单 ----------
 const formVisible = ref(false)
@@ -148,6 +152,12 @@ onMounted(() => {
   if (!jdksStore.loaded) {
     jdksStore.refresh().catch(() => {}) // JDK 名映射缺失时静默降级（卡片显示"JDK 缺失"）
   }
+  ipc.app
+    .getVersion()
+    .then((v) => {
+      appVersion.value = v
+    })
+    .catch(() => {}) // 版本获取失败仅不展示，不影响面板功能
   tickTimer = setInterval(() => {
     now.value = Date.now()
   }, 1000)
@@ -163,6 +173,7 @@ onBeforeUnmount(() => {
     <div class="page-header">
       <h2>项目面板</h2>
       <span class="hint">启停经主进程操作队列串行化；状态红绿灯四态（绿运行/灰停止/黄启动中/红异常退出）</span>
+      <span v-if="appVersion !== ''" class="version">v{{ appVersion }}</span>
     </div>
 
     <div class="toolbar">
@@ -226,6 +237,12 @@ onBeforeUnmount(() => {
 .hint {
   color: var(--el-text-color-secondary);
   font-size: 12px;
+}
+.version {
+  margin-left: auto;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 .toolbar {
   display: flex;

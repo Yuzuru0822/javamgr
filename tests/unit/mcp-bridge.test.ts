@@ -18,16 +18,33 @@ import type { McpToolServices } from '../../src/main/mcp/tools'
  */
 
 const services: McpToolServices = {
-  store: { listProjects: () => [], listJdks: () => [] },
+  store: {
+    listProjects: () => [],
+    listJdks: () => [],
+    createProject: async (input) => ({ id: 'no-op', ...input }),
+    updateProject: async (input) => ({ ...input }),
+    deleteProject: async (input) => ({
+      id: input,
+      name: 'no-op',
+      jarPath: 'noop.jar',
+      jdkId: 'jdk-noop',
+      jvmArgs: [],
+      programArgs: [],
+      envVars: {}
+    })
+  },
   processControl: {
     getRuntimeState: () => undefined,
     startProject: async () => ({ ok: false, error: 'no-op' }),
     stopProject: async () => ({ ok: true, durationMs: 0 }),
-    restartProject: async () => ({ ok: false, error: 'no-op' })
+    restartProject: async () => ({ ok: false, error: 'no-op' }),
+    startAllProjects: async () => ({ results: [] }),
+    stopAllProjects: async () => ({ results: [] })
   },
   logService: {
     readHistory: async () => ({ source: 'stdout', lines: [] }),
-    search: async () => ({ matches: [], truncated: false })
+    search: async () => ({ matches: [], truncated: false }),
+    switchRoute: () => {}
   }
 }
 

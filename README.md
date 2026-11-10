@@ -12,7 +12,7 @@ src/shared/          主/渲染/preload 共享类型与 IPC 通道常量（零�
 src/main/            主进程（唯一权威状态源）
   ├ process/         进程管理核心：状态机 + projectId 操作队列 + taskkill 树终止 + PID 重识别轮询池
   ├ log/             日志：file|stdout 双路由、编码自动判定（非 ASCII 才锁定）、10MB 轮转、检索
-  ├ mcp/             MCP 宿主（契约端口）+ 7 工具 + stdio 桥接（--mcp-stdio）
+  ├ mcp/             MCP 宿主（契约端口）+ 13 工具 + stdio 桥接（--mcp-stdio）
   ├ jdk/             JDK 扫描（标准根目录 + JAVA_HOME + 自定义根）
   ├ config/          projects/jdks/settings.json（内存缓存 + 变更即写 + 原子写 + 损坏备份重建）
   └ telemetry/       event loop 延迟打点（设置页可查看；utilityProcess 演进条件度量）
@@ -64,7 +64,15 @@ node scripts/packaged-smoke.mjs <目录>      # 指定 win-unpacked 目录
 
 ## Agent 接入（MCP）
 
-7 个工具：`list_projects` / `get_status` / `start_project` / `stop_project` / `restart_project` / `read_logs` / `search_logs`（keyword/level/时间窗/上下文；`project` 参数支持精确 id → 精确名 → 忽略大小写 → 唯一前缀）。
+13 个工具，与 GUI 面板同源等价：
+
+- 查询：`list_projects`（含实时状态）/ `get_status` / `list_jdks`（create/update 的 jdkId 候选）
+- 单项启停：`start_project`（幂等）/ `stop_project`（杀进程树）/ `restart_project`（原子组合）
+- 批量：`start_all_projects` / `stop_all_projects`（全部启动/停止，单项失败不中断）
+- 项目管理：`create_project`（新建）/ `update_project`（部分更新，缺省沿用现值）/ `delete_project`（运行中须 confirm=true：先停再删）
+- 日志：`read_logs` / `search_logs`（keyword/level/时间窗/上下文）
+
+`project` 参数支持精确 id → 精确名 → 忽略大小写 → 唯一前缀；歧义/未命中返回候选列表。
 
 HTTP（固定契约端口，默认 7777）：
 

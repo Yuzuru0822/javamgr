@@ -19,7 +19,7 @@ import { createTaskOps } from '../../src/main/process/task-killer'
  * MCP HTTP 通道端到端集成（计划 §3 S5 / §4 A15+A17+A18 的 MCP 侧预演 / §6 R4 演练基础）：
  * 真实服务层（ProcessManager + LogManager 同源接线，与主进程装配一致）+ 夹具 jar +
  * McpHost 随机高位端口（注入避免与开发实例 7777 冲突）+ SDK Client 经 Streamable HTTP 接入：
- * 1. initialize + tools/list 返回 7 工具（A15）；
+ * 1. initialize + tools/list 返回 13 工具（A15 + 2026-11-10 面板同款补齐 6 工具）；
  * 2. start_project 真起进程 → get_status RUNNING（首条日志驱动）→ search_logs(level=ERROR) 有结果
  *    → read_logs 路由正确 → restart_project → stop_project → tasklist 核对无残留（A17/A18 台词）；
  * 3. 幂等：RUNNING 下二次 start 返回同一 pid；已停项目 stop 幂等 ok（A17）。
@@ -155,7 +155,7 @@ beforeAll(async () => {
     }
   })
 
-  // 3) MCP 宿主（真实 7 工具 + 契约端口策略；注入随机高位端口避免与开发实例 7777 冲突）
+  // 3) MCP 宿主（真实 13 工具 + 契约端口策略；注入随机高位端口避免与开发实例 7777 冲突）
   mcpPort = await getFreePort()
   mcpHost = new McpHost({
     services: { store, processControl: processManager, logService: logManager },
@@ -202,8 +202,8 @@ async function rmWithRetry(target: string, attempts = 5): Promise<void> {
   }
 }
 
-describe('integration/mcp：HTTP 通道 7 工具端到端（真实服务层 + 夹具 jar）', () => {
-  it('initialize + tools/list：返回 7 工具，serverInfo.name=javamgr（A15）', async () => {
+describe('integration/mcp：HTTP 通道 13 工具端到端（真实服务层 + 夹具 jar）', () => {
+  it('initialize + tools/list：返回 13 工具，serverInfo.name=javamgr（A15）', async () => {
     expect(client.getServerVersion()?.name).toBe('javamgr')
     const result = await client.listTools()
     expect(result.tools.map((t) => t.name).sort()).toEqual(
@@ -214,7 +214,13 @@ describe('integration/mcp：HTTP 通道 7 工具端到端（真实服务层 + �
         'stop_project',
         'restart_project',
         'read_logs',
-        'search_logs'
+        'search_logs',
+        'list_jdks',
+        'create_project',
+        'update_project',
+        'delete_project',
+        'start_all_projects',
+        'stop_all_projects'
       ].sort()
     )
   })

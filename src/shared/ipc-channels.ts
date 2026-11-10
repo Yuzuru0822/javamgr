@@ -45,6 +45,8 @@ export const IPC_REQUESTS = {
   SETTINGS_SET: 'settings:set',
   /** — | McpInfo：{enabled, port, url, bridgeCommand} */
   APP_GET_MCP_INFO: 'app:getMcpInfo',
+  /** — | string（app.getVersion()：开发期取 package.json，打包后取安装包版本） */
+  APP_GET_VERSION: 'app:getVersion',
   /** — | EventLoopMetrics（N-6：主进程 event loop 简易打点，设置页查看） */
   APP_GET_EVENT_LOOP_METRICS: 'app:getEventLoopMetrics',
   /**

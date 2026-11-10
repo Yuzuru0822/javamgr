@@ -100,6 +100,8 @@ export const ipc = {
   },
   app: {
     getMcpInfo: (): Promise<McpInfo> => invoke<McpInfo>(IPC_REQUESTS.APP_GET_MCP_INFO),
+    /** 应用版本号（项目面板页头展示；开发期取 package.json，打包后取安装包版本） */
+    getVersion: (): Promise<string> => invoke<string>(IPC_REQUESTS.APP_GET_VERSION),
     /** N-6：主进程事件循环延迟指标（设置页运行状况区块） */
     getEventLoopMetrics: (): Promise<EventLoopMetrics> =>
       invoke<EventLoopMetrics>(IPC_REQUESTS.APP_GET_EVENT_LOOP_METRICS),
