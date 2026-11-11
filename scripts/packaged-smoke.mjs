@@ -27,7 +27,7 @@ const exe = path.join(appDir, 'javamgr.exe')
 const userDataDir = path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'javamgr')
 const portFile = path.join(userDataDir, 'mcp.port')
 const settingsFile = path.join(userDataDir, 'config', 'settings.json')
-/** 冒烟用契约端口（7777 常被本机 aTrustXtunnel VPN 客户端占用——用它验证 bind-failed 显式失败路径，
+/** 冒烟用契约端口（7777 常被本机 VPN 客户端占用——用它验证 bind-failed 显式失败路径，
  *  再以空闲端口 17877 验证功能链路） */
 const SMOKE_PORT = 17_877
 const MCP_URL = `http://127.0.0.1:${SMOKE_PORT}/mcp`
@@ -117,7 +117,7 @@ try {
   await resetUserData()
 
   // ---------- 阶段 0：默认端口 7777 被外部进程占用 → bind-failed 显式失败（R4/A15） ----------
-  // 本机 7777 恰被 aTrustXtunnel（VPN）占用，正好验证"绝不静默漂移"：
+  // 本机 7777 恰被 VPN 客户端占用，正好验证"绝不静默漂移"：
   // 首次干净启动（无 settings.json → 默认 7777）→ MCP 启动失败但主进程稳定、mcp.port 不落盘
   const occupied = await new Promise((resolve) => {
     const s = net.connect({ port: 7777, host: '127.0.0.1', timeout: 1_500 })
