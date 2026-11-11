@@ -5,15 +5,20 @@ import type { ProjectWithRuntime } from '@shared/types'
 import { useProjectsStore } from '@renderer/stores/projects'
 import { useJdksStore } from '@renderer/stores/jdks'
 import { ipc } from '@renderer/api/ipc'
+import { isSortKey, sortProjects } from '@renderer/utils/project-sort'
+import type { ProjectSortKey, ProjectSortOrder } from '@renderer/utils/project-sort'
 import ProjectCard from '@renderer/components/ProjectCard.vue'
+import ProjectTable from '@renderer/components/ProjectTable.vue'
 import ProjectForm from '@renderer/components/ProjectForm.vue'
 import JarImportDialog from '@renderer/components/JarImportDialog.vue'
 import LogViewer from '@renderer/components/LogViewer.vue'
 
 /**
- * 项目面板（计划 §2.4 / §3 S3.6 + S4.7）：卡片网格 + 批量工具条（全部启动/停止）。
+ * 项目面板（计划 §2.4 / §3 S3.6 + S4.7）：卡片/列表双视图 + 批量工具条（全部启动/停止）。
  * 实时状态：store 已在 App 层订阅 proc:statusChanged；本视图仅秒级 tick 派生 uptime。
  * S4："查看日志"打开 LogViewer 抽屉（实时滚动/暂停/过滤/上下文检索，支持项目切换）。
+ * v0.6.0：卡片/分页列表可切换；名称/状态/运行时间/PID 排序对两种视图同时生效；
+ * 视图/排序/分页大小为纯 UI 偏好，持久化在 localStorage（Electron 窗口与浏览器面板同源生效）。
  */
 const store = useProjectsStore()
 const jdksStore = useJdksStore()
@@ -26,6 +31,92 @@ let tickTimer: ReturnType<typeof setInterval> | null = null
 
 // ---------- 系统版本号（页头右上角；失败静默留空，不阻塞面板） ----------
 const appVersion = ref('')
+
+// ---------- 视图 / 排序 / 分页（v0.6.0：纯 UI 偏好持久化 localStorage） ----------
+
+const LS = {
+  view: 'javamgr.dashboard.view',
+  sortKey: 'javamgr.dashboard.sortKey',
+  sortOrder: 'javamgr.dashboard.sortOrder',
+  pageSize: 'javamgr.dashboard.pageSize'
+} as const
+
+function readLS(key: string): string | null {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    return null // 隐私模式等存储不可用时按默认处理
+  }
+}
+
+function writeLS(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    /* 持久化失败不影响本次会话内生效 */
+  }
+}
+
+const PAGE_SIZES = [10, 20, 50, 100]
+
+const viewMode = ref<'card' | 'list'>(readLS(LS.view) === 'list' ? 'list' : 'card')
+const savedKey = readLS(LS.sortKey)
+const sortKey = ref<ProjectSortKey>(isSortKey(savedKey) ? savedKey : 'default')
+const sortOrder = ref<ProjectSortOrder>(readLS(LS.sortOrder) === 'desc' ? 'desc' : 'asc')
+const pageSize = ref(
+  PAGE_SIZES.find((s) => s === Number(readLS(LS.pageSize))) ?? PAGE_SIZES[1]!
+)
+const currentPage = ref(1)
+
+watch(viewMode, (v) => writeLS(LS.view, v))
+watch(pageSize, (v) => writeLS(LS.pageSize, String(v)))
+// 字段与方向成对写盘：sortOrder 值可能不变（如从 desc 名称切到 desc 状态），
+// 单独 watch 会漏写，恢复时方向会串档
+watch([sortKey, sortOrder], ([key, order]) => {
+  writeLS(LS.sortKey, key)
+  writeLS(LS.sortOrder, order)
+})
+
+/** 排序条件变化后回到第 1 页（内容重排后停留原页码意义不大） */
+watch([sortKey, sortOrder], () => {
+  currentPage.value = 1
+})
+
+/** 删除项目/改页大小导致总页数缩水时收拢页码，避免停留在空页 */
+watch(
+  [() => store.projects.length, pageSize],
+  ([total, size]) => {
+    const maxPage = Math.max(1, Math.ceil(total / size))
+    if (currentPage.value > maxPage) currentPage.value = maxPage
+  }
+)
+
+const sortedProjects = computed(() =>
+  sortProjects(store.projects, sortKey.value, sortOrder.value, now.value)
+)
+
+/** 列表视图当前页行（卡片视图不分页，直接渲染排序全集） */
+const pagedProjects = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value
+  return sortedProjects.value.slice(start, start + pageSize.value)
+})
+
+function toggleSortOrder(): void {
+  sortOrder.value = sortOrder.value === 'asc' ? 'desc' : 'asc'
+}
+
+/** 列表表头排序点击（sortable="custom"）：null = 第三次点击取消排序，恢复默认顺序 */
+function onTableSortChange(
+  prop: string,
+  order: 'ascending' | 'descending' | null
+): void {
+  if (order === null || !isSortKey(prop) || prop === 'default') {
+    sortKey.value = 'default'
+    return
+  }
+  sortKey.value = prop
+  sortOrder.value = order === 'descending' ? 'desc' : 'asc'
+}
 
 // ---------- 表单 ----------
 const formVisible = ref(false)
@@ -317,11 +408,36 @@ onBeforeUnmount(() => {
       >
         取消选择
       </el-button>
+      <span class="toolbar-spacer" />
+      <el-radio-group v-model="viewMode" size="small">
+        <el-radio-button value="card">卡片</el-radio-button>
+        <el-radio-button value="list">列表</el-radio-button>
+      </el-radio-group>
+      <el-select
+        v-model="sortKey"
+        size="small"
+        class="sort-select"
+        aria-label="排序字段"
+      >
+        <el-option label="默认排序" value="default" />
+        <el-option label="按名称" value="name" />
+        <el-option label="按状态" value="status" />
+        <el-option label="按运行时间" value="uptime" />
+        <el-option label="按 PID" value="pid" />
+      </el-select>
+      <el-button
+        size="small"
+        :disabled="sortKey === 'default'"
+        :aria-label="sortOrder === 'asc' ? '切换为降序' : '切换为升序'"
+        @click="toggleSortOrder"
+      >
+        {{ sortOrder === 'asc' ? '升序' : '降序' }}
+      </el-button>
     </div>
 
-    <div v-if="store.projects.length > 0" class="grid">
+    <div v-if="store.projects.length > 0 && viewMode === 'card'" class="grid">
       <ProjectCard
-        v-for="project in store.projects"
+        v-for="project in sortedProjects"
         :key="project.id"
         :project="project"
         :jdk-name="jdkNameOf(project)"
@@ -336,6 +452,35 @@ onBeforeUnmount(() => {
         @remove="handleRemove"
       />
     </div>
+    <template v-else-if="store.projects.length > 0 && viewMode === 'list'">
+      <ProjectTable
+        :projects="pagedProjects"
+        :jdk-names="jdkNameById"
+        :now="now"
+        :selected-ids="selectedIds"
+        :sort-key="sortKey"
+        :sort-order="sortOrder"
+        @sort-change="onTableSortChange"
+        @select="toggleSelect"
+        @start="handleStart"
+        @stop="handleStop"
+        @restart="handleRestart"
+        @logs="openLogs"
+        @edit="openEdit"
+        @remove="handleRemove"
+      />
+      <div class="pagination">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :total="store.projects.length"
+          :page-sizes="PAGE_SIZES"
+          size="small"
+          background
+          layout="total, sizes, prev, pager, next"
+        />
+      </div>
+    </template>
     <el-empty v-else description="暂无纳管项目：点击「新建项目」注册预构建 jar（配置持久化在 userData/config/projects.json）" />
 
     <ProjectForm v-model:visible="formVisible" :project="editingProject" />
@@ -375,6 +520,18 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   margin: 12px 0;
+  flex-wrap: wrap;
+}
+.toolbar-spacer {
+  flex: 1;
+}
+.sort-select {
+  width: 120px;
+}
+.pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 .grid {
   display: grid;

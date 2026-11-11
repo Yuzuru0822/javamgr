@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { ProjectWithRuntime, RunStatus } from '@shared/types'
+import { formatDuration } from '@renderer/utils/format'
 import StatusLight from '@renderer/components/StatusLight.vue'
 
 /**
@@ -40,20 +41,6 @@ const uptimeText = computed(() => {
   if (p.status !== 'RUNNING' || p.startTime === undefined) return undefined
   return formatDuration(props.now - p.startTime)
 })
-
-/** 天/时/分/秒 人性化时长 */
-function formatDuration(ms: number): string {
-  if (ms < 0) ms = 0
-  const s = Math.floor(ms / 1000)
-  const d = Math.floor(s / 86400)
-  const h = Math.floor((s % 86400) / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = s % 60
-  if (d > 0) return `${d}天${h}小时`
-  if (h > 0) return `${h}小时${m}分`
-  if (m > 0) return `${m}分${sec}秒`
-  return `${sec}秒`
-}
 </script>
 
 <template>
