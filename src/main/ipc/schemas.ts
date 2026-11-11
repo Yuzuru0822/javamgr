@@ -93,7 +93,10 @@ export const settingsSetSchema = z
     logMaxRotations: z.number().int().min(1).max(10).optional(),
     logRunsToKeep: z.number().int().min(1).max(100).optional(),
     scanRoots: z.array(z.string().min(1)).optional(),
-    closeToTray: z.boolean().optional()
+    closeToTray: z.boolean().optional(),
+    /** v0.5.0 浏览器面板 */
+    webEnabled: z.boolean().optional(),
+    webPort: z.number().int().min(1).max(65535, '端口范围 1–65535').optional()
   })
   .strict()
 

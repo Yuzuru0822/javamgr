@@ -21,26 +21,93 @@ import type {
   SearchResult,
   Settings,
   StatusChangedEvent,
-  UpdaterStatus
+  UpdaterStatus,
+  WebInfo
 } from '@shared/types'
-import type { IpcRequestChannel } from '@shared/ipc-channels'
+import type { IpcEventChannel, IpcRequestChannel } from '@shared/ipc-channels'
 
 /**
  * window.api 类型化封装（§2.2 api/ipc.ts）：全部请求/事件经此文件，
  * 组件与 store 不直接触碰 window.api；通道名与载荷类型均来自 src/shared 单一来源。
  *
- * 错误协议：主进程 ipc-registry 把结构化错误 JSON 塞进 Error.message；invoke 在此
- * 统一还原为带 .code 的 Error（VALIDATION_ERROR / NOT_FOUND / CONFLICT /
+ * 双传输（v0.5.0）：Electron 窗口走 preload 注入的 window.api（ipcRenderer 桥）；
+ * 浏览器面板（WebHost 服务本构建产物）无 preload → 自动回退 HTTP+SSE——
+ * POST /web/api/<channel> 透传主进程同一组 IPC handler（零第二实现），
+ * GET /web/events 单 SSE 流按 channel 分发（与窗口推送同源同载荷）。
+ *
+ * 错误协议：主进程 ipc-registry 把结构化错误 JSON 塞进 Error.message；两种传输
+ * 在此统一还原为带 .code 的 Error（VALIDATION_ERROR / NOT_FOUND / CONFLICT /
  * NOT_IMPLEMENTED / INTERNAL），store/组件可按 code 分支提示。
  */
 
+// ---------- 传输层（Electron / 浏览器自动选择） ----------
+
+/** 调用时动态判定（preload 在 window 加载早期注入；测试 beforeEach 后注入同样生效） */
+function bridge(): NonNullable<typeof window.api> | undefined {
+  return typeof window !== 'undefined' ? window.api : undefined
+}
+
 async function invoke<T>(channel: IpcRequestChannel, ...args: unknown[]): Promise<T> {
-  try {
-    return await window.api.invoke<T>(channel, ...args)
-  } catch (err) {
-    throw normalizeIpcError(err)
+  const b = bridge()
+  if (b) {
+    try {
+      return await b.invoke<T>(channel, ...args)
+    } catch (err) {
+      throw normalizeIpcError(err)
+    }
+  }
+  return httpInvoke<T>(channel, args[0])
+}
+
+/** 浏览器传输：POST /web/api/<channel>（同源 fetch；结构化错误协议与 Electron 路径同形） */
+async function httpInvoke<T>(channel: IpcRequestChannel, body: unknown): Promise<T> {
+  const res = await fetch(`/web/api/${channel}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body ?? {})
+  })
+  const payload = (await res.json().catch(() => null)) as
+    | { ok: true; data: T }
+    | { ok: false; code: string; message: string }
+    | null
+  if (payload === null) {
+    throw new Error(`通道 ${channel} 响应非 JSON（HTTP ${res.status}）`)
+  }
+  if (!payload.ok) {
+    const normalized = new Error(payload.message)
+    Object.assign(normalized, { code: payload.code })
+    throw normalized
+  }
+  return payload.data
+}
+
+/** 浏览器传输：单 SSE 流按 channel 分发（懒建立；Electron 路径直连 ipcRenderer） */
+function webSubscribe<T>(channel: IpcEventChannel, listener: (payload: T) => void): () => void {
+  const listeners = webEventListeners
+  const set = listeners.get(channel) ?? new Set()
+  set.add(listener as (payload: unknown) => void)
+  listeners.set(channel, set)
+  if (!webEventSource) {
+    webEventSource = new EventSource('/web/events')
+    webEventSource.onmessage = (event: MessageEvent<string>) => {
+      try {
+        const { channel: ch, payload } = JSON.parse(event.data) as {
+          channel: string
+          payload: unknown
+        }
+        for (const l of listeners.get(ch as IpcEventChannel) ?? []) l(payload)
+      } catch {
+        // 非 JSON 帧忽略（心跳注释不会进入 onmessage）
+      }
+    }
+  }
+  return () => {
+    set.delete(listener as (payload: unknown) => void)
   }
 }
+
+const webEventListeners = new Map<IpcEventChannel, Set<(payload: unknown) => void>>()
+let webEventSource: EventSource | null = null
 
 /** 从 Electron 包装过的 rejection message 还原结构化错误；非协议错误原样抛出 */
 function normalizeIpcError(err: unknown): unknown {
@@ -122,20 +189,42 @@ export const ipc = {
     installUpdateNow: (): Promise<void> => invoke<void>(IPC_REQUESTS.UPDATER_INSTALL_NOW),
     /** 当前更新状态快照（重开设置页恢复下载进度等） */
     getUpdaterState: (): Promise<UpdaterStatus> =>
-      invoke<UpdaterStatus>(IPC_REQUESTS.UPDATER_GET_STATE)
+      invoke<UpdaterStatus>(IPC_REQUESTS.UPDATER_GET_STATE),
+    /** v0.5.0 浏览器面板访问信息 */
+    getWebInfo: (): Promise<WebInfo> => invoke<WebInfo>(IPC_REQUESTS.WEB_GET_INFO)
   }
 } as const
 
 /** 事件订阅：均返回取消订阅函数（组件 onUnmounted 时调用） */
 export const ipcEvents = {
-  statusChanged: (listener: (payload: StatusChangedEvent) => void): (() => void) =>
-    window.api.on<StatusChangedEvent>(IPC_EVENTS.PROC_STATUS_CHANGED, listener),
-  logAppended: (listener: (payload: LogAppendedEvent) => void): (() => void) =>
-    window.api.on<LogAppendedEvent>(IPC_EVENTS.LOG_APPENDED, listener),
-  scanProgress: (listener: (payload: ScanProgressEvent) => void): (() => void) =>
-    window.api.on<ScanProgressEvent>(IPC_EVENTS.JDK_SCAN_PROGRESS, listener),
-  portChanged: (listener: (payload: PortChangedEvent) => void): (() => void) =>
-    window.api.on<PortChangedEvent>(IPC_EVENTS.MCP_PORT_CHANGED, listener),
-  updaterStatus: (listener: (payload: UpdaterStatus) => void): (() => void) =>
-    window.api.on<UpdaterStatus>(IPC_EVENTS.UPDATER_STATUS, listener)
+  statusChanged: (listener: (payload: StatusChangedEvent) => void): (() => void) => {
+    const b = bridge()
+    return b
+      ? b.on<StatusChangedEvent>(IPC_EVENTS.PROC_STATUS_CHANGED, listener)
+      : webSubscribe(IPC_EVENTS.PROC_STATUS_CHANGED, listener)
+  },
+  logAppended: (listener: (payload: LogAppendedEvent) => void): (() => void) => {
+    const b = bridge()
+    return b
+      ? b.on<LogAppendedEvent>(IPC_EVENTS.LOG_APPENDED, listener)
+      : webSubscribe(IPC_EVENTS.LOG_APPENDED, listener)
+  },
+  scanProgress: (listener: (payload: ScanProgressEvent) => void): (() => void) => {
+    const b = bridge()
+    return b
+      ? b.on<ScanProgressEvent>(IPC_EVENTS.JDK_SCAN_PROGRESS, listener)
+      : webSubscribe(IPC_EVENTS.JDK_SCAN_PROGRESS, listener)
+  },
+  portChanged: (listener: (payload: PortChangedEvent) => void): (() => void) => {
+    const b = bridge()
+    return b
+      ? b.on<PortChangedEvent>(IPC_EVENTS.MCP_PORT_CHANGED, listener)
+      : webSubscribe(IPC_EVENTS.MCP_PORT_CHANGED, listener)
+  },
+  updaterStatus: (listener: (payload: UpdaterStatus) => void): (() => void) => {
+    const b = bridge()
+    return b
+      ? b.on<UpdaterStatus>(IPC_EVENTS.UPDATER_STATUS, listener)
+      : webSubscribe(IPC_EVENTS.UPDATER_STATUS, listener)
+  }
 } as const

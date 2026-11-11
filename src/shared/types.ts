@@ -115,6 +115,10 @@ export interface Settings {
   scanRoots: string[]
   /** 关闭窗口 = 最小化到托盘 */
   closeToTray: boolean
+  /** 本地浏览器访问面板（v0.5.0：WebHost 服务同一渲染端 UI，仅绑定 127.0.0.1） */
+  webEnabled: boolean
+  /** 浏览器访问契约端口（默认 7790；避开 MCP 桥接递增探测段 7777–7786） */
+  webPort: number
 }
 
 // ---------- 日志 ----------
@@ -246,6 +250,15 @@ export interface McpInfo {
   error?: string
   /** bind-failed 时的占用进程名 */
   occupantName?: string
+}
+
+/** web:getInfo 返回（v0.5.0：浏览器面板访问信息；enabled=实际监听中） */
+export interface WebInfo {
+  enabled: boolean
+  port: number
+  url: string
+  /** 启动失败原因（端口被占等；成功时省略） */
+  error?: string
 }
 
 // ---------- 运行指标（N-6：event loop 简易打点，设置页可查看） ----------

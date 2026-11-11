@@ -3,7 +3,7 @@ import path from 'node:path'
 import { createReadStream, createWriteStream } from 'node:fs'
 import { configureUserData, ensureDirs, getPaths } from './config/paths'
 import { ConfigStore, CONFIG_EVENTS } from './config/config-store'
-import { broadcastEvent, registerIpcHandlers } from './ipc/ipc-registry'
+import { broadcastEvent, registerIpcHandlers, setWebBroadcaster } from './ipc/ipc-registry'
 import { DEFAULT_SCAN_ROOTS, mergeJdks, scanJdks } from './jdk/jdk-scanner'
 import { managedJarSet, scanJars } from './jar/jar-scanner'
 import { ProcessManager } from './process/process-manager'
@@ -13,6 +13,7 @@ import { runBridge } from './mcp/run-bridge'
 import { prepareExit } from './lifecycle'
 import { createTray, mcpTrayTooltip } from './tray'
 import { UpdaterHost } from './updater'
+import { WebHost } from './web/web-host'
 import { EventLoopMonitor } from './telemetry/event-loop-monitor'
 import { IPC_EVENTS } from '../shared/ipc-channels'
 import type { Settings } from '../shared/types'
@@ -183,6 +184,9 @@ function startMainMode(): void {
     // tray（原声明在其后，属 TDZ 脆弱写法；运行时序虽安全，声明前置消除隐患）
     let tray: Tray | null = null
 
+    // v0.5.0：浏览器面板宿主（let 前置：ipc 注册的 webStatus 惰性引用，构造在注册后）
+    let webHost: WebHost | null = null
+
     // S4：S-1 握手接线——process → log 唯一通道（run:started 管道句柄交付）
     processManager.setLogHooks({
       onRunStarted: (event) => logManager.handleRunStarted(event)
@@ -216,7 +220,7 @@ function startMainMode(): void {
       }
     })
 
-    registerIpcHandlers({
+    const ipcHandle = registerIpcHandlers({
       store,
       processControl: {
         getRuntimeState: (id) => processManager.getRuntimeState(id),
@@ -229,8 +233,22 @@ function startMainMode(): void {
       logService: logManager,
       mcpStatus: mcpHost,
       eventLoop: eventLoopMonitor,
-      updater: updaterHost
+      updater: updaterHost,
+      webStatus: {
+        // 惰性引用：WebHost 在注册完成后构造（需要 ipcHandle.call）
+        getWebStatus: () => webHost?.getWebStatus() ?? { enabled: false }
+      }
     })
+
+    // v0.5.0：浏览器面板（静态 UI + IPC 透传 + SSE 事件，仅 127.0.0.1）
+    webHost = new WebHost({
+      rootDir: path.join(__dirname, '../renderer'), // 与 createWindow loadFile 同源（dev 与 asar 均适用）
+      getPort: () => store.getSettings().webPort,
+      isEnabled: () => store.getSettings().webEnabled,
+      call: ipcHandle.call
+      // onStatus 暂不接：设置页经 web:getInfo 主动拉取（变更即重启后拉取新状态）
+    })
+    setWebBroadcaster((channel, payload) => webHost?.broadcast(channel, payload))
 
     createWindow()
 
@@ -301,6 +319,21 @@ function startMainMode(): void {
       })
     })
 
+    // ==================== v0.5.0：浏览器面板启动 + settings 变更重启（同款串行门） ====================
+
+    runGated(async () => {
+      await webHost?.start() // 禁用时置 disabled 状态；被占显式报错不漂移
+    })
+
+    let lastWeb = { enabled: store.getSettings().webEnabled, port: store.getSettings().webPort }
+    store.on(CONFIG_EVENTS.SETTINGS_CHANGED, (next: Settings) => {
+      if (next.webEnabled === lastWeb.enabled && next.webPort === lastWeb.port) return
+      lastWeb = { enabled: next.webEnabled, port: next.webPort }
+      runGated(async () => {
+        await webHost?.start() // 内部先停再按新设置重绑（禁用 → stop 语义）
+      })
+    })
+
     // S3：退出策略（keep 默认 | stopAll）——before-quit 拆两段式（同步事件无法 await）
     let exitPrepared = false
     app.on('before-quit', (event) => {
@@ -322,6 +355,9 @@ function startMainMode(): void {
         // S5：MCP 宿主收尾（停 HTTP 监听 + 删 mcp.port——主实例已退出，残留端口文件只会误导桥接探测）
         .then(() => mcpHost.stop({ removePortFile: true }))
         .catch((err: unknown) => console.error('[mcp-host] 退出收尾失败：', err))
+        // v0.5.0：浏览器面板收尾
+        .then(() => webHost?.stop())
+        .catch((err: unknown) => console.error('[web-host] 退出收尾失败：', err))
         .finally(() => {
           // P3-5（phase4 审查）：退出前停止事件循环打点采样（1s interval 不再空转）
           eventLoopMonitor.stop()

@@ -62,7 +62,9 @@ export const IPC_REQUESTS = {
   /** — | void（下载完成后立即重启静默安装；主进程随即退出，返回值仅为通道契约占位） */
   UPDATER_INSTALL_NOW: 'updater:installNow',
   /** — | UpdaterStatus（当前更新状态快照：重开设置页时恢复下载进度等） */
-  UPDATER_GET_STATE: 'updater:getState'
+  UPDATER_GET_STATE: 'updater:getState',
+  /** — | WebInfo：{enabled, port, url, error?}（v0.5.0 浏览器面板访问信息） */
+  WEB_GET_INFO: 'web:getInfo'
 } as const
 
 export const IPC_EVENTS = {

@@ -1,6 +1,6 @@
 # javamgr — Windows Java 进程管理器（Electron + 内嵌 MCP）
 
-桌面工具 + MCP 服务同体：注册预构建 jar 项目（不做编译构建），红绿灯启停 + 卡片多选批量（启动/重启/停止所选，PowerShell 杀进程树），目录递归扫描 jar 批量导入（勾选 → 批量指派项目名/JDK → 一键纳管），双策略日志（logback 文件 tail / stdout 捕获 GBK·UTF-8 自动转码），内嵌 MCP 双通道（Streamable HTTP 契约端口 + stdio 桥接）供 Agent 全管控——取代「CD → 开 CMD → java -jar」手工工作流。
+桌面工具 + MCP 服务同体：注册预构建 jar 项目（不做编译构建），红绿灯启停 + 卡片多选批量（启动/重启/停止所选，PowerShell 杀进程树），目录递归扫描 jar 批量导入（勾选 → 批量指派项目名/JDK → 一键纳管），双策略日志（logback 文件 tail / stdout 捕获 GBK·UTF-8 自动转码），内嵌 MCP 双通道（Streamable HTTP 契约端口 + stdio 桥接）供 Agent 全管控，**本地浏览器面板**（同一 UI 双传输：Electron 窗口 / 浏览器 HTTP+SSE），应用内自动更新（GitHub Releases 差量下载）——取代「CD → 开 CMD → java -jar」手工工作流。
 
 - 技术栈：Electron 33 + electron-vite + Vue 3 + Element Plus + Pinia + TypeScript（strict）+ @modelcontextprotocol/sdk + zod + iconv-lite
 - 平台：仅 Windows、单用户、本地运行（无远程/多机/认证）
@@ -77,6 +77,14 @@ gh release create v<version> \
   dist/latest.yml \
   --title "javamgr v<version>" --notes "..."
 ```
+
+## 本地浏览器面板（v0.5.0）
+
+设置页「浏览器访问面板」开关（默认开，端口默认 7790，仅绑定 127.0.0.1）。本机浏览器打开 `http://127.0.0.1:7790` 即是与桌面窗口**完全同源的面板**：
+
+- **同一 UI、双传输**：WebHost 服务同一渲染端构建产物；浏览器内无 preload 注入，`api/ipc.ts` 自动回退 HTTP+SSE——请求走 `POST /web/api/<通道>`（透传主进程与 `ipcMain.handle` **同一组 handler**，零第二实现），事件走单条 SSE 流按通道分发（与窗口推送同源同载荷）；
+- **安全**：Host 头必须为本机字面量（防 DNS 重绑定）、跨站 Origin 一律 403（防任意网站 CSRF）、静态路径穿越防护、POST 仅收 JSON、请求体上限 1MB；
+- Electron 窗口关闭（驻留托盘）不影响浏览器面板；应用退出时面板随之关闭。跨设备访问需自行做端口转发（如 SSH 隧道），工具本身只监听本机。
 
 ## Agent 接入（MCP）
 

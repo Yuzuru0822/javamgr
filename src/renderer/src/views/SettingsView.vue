@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { EventLoopMetrics, McpInfo, UpdaterStatus } from '@shared/types'
+import type { EventLoopMetrics, McpInfo, UpdaterStatus, WebInfo } from '@shared/types'
 import { ipc, ipcEvents } from '@renderer/api/ipc'
 import { useSettingsStore } from '@renderer/stores/settings'
 
@@ -338,6 +338,61 @@ const mcpStatusLabel = computed(() => {
   return { text: '启动失败', type: 'danger' as const }
 })
 
+// ==================== 浏览器面板访问（v0.5.0：WebHost 同一 UI 双传输） ====================
+
+const webInfo = ref<WebInfo | null>(null)
+const webEnabledLocal = ref(true)
+const webPortLocal = ref(7790)
+const savingWeb = ref(false)
+
+async function refreshWebInfo(): Promise<void> {
+  try {
+    webInfo.value = await ipc.app.getWebInfo()
+    if (settingsStore.settings) {
+      webEnabledLocal.value = settingsStore.settings.webEnabled
+      webPortLocal.value = settingsStore.settings.webPort
+    }
+  } catch (err) {
+    console.error('读取浏览器面板信息失败：', err)
+  }
+}
+
+async function saveWebEnabled(enabled: boolean): Promise<void> {
+  savingWeb.value = true
+  try {
+    await settingsStore.save({ webEnabled: enabled })
+    await refreshWebInfo()
+    ElMessage.success(enabled ? '浏览器面板已启用' : '浏览器面板已停用')
+  } catch (err) {
+    ElMessage.error(`保存失败：${errText(err)}`)
+    webEnabledLocal.value = !enabled
+  } finally {
+    savingWeb.value = false
+  }
+}
+
+async function saveWebPort(port: number | undefined): Promise<void> {
+  if (port === undefined || port === settingsStore.settings?.webPort) return
+  savingWeb.value = true
+  try {
+    await settingsStore.save({ webPort: port })
+    await refreshWebInfo()
+    if (webInfo.value?.enabled) ElMessage.success(`浏览器面板端口已改为 ${port}，新地址见下方`)
+    else ElMessage.warning('端口已保存，但面板启动失败（见下方错误）')
+  } catch (err) {
+    ElMessage.error(`保存失败：${errText(err)}`)
+    webPortLocal.value = settingsStore.settings?.webPort ?? 7790
+  } finally {
+    savingWeb.value = false
+  }
+}
+
+const webStatusLabel = computed(() => {
+  if (!settingsStore.settings?.webEnabled) return { text: '已禁用', type: 'info' as const }
+  if (webInfo.value?.enabled) return { text: '运行中', type: 'success' as const }
+  return { text: '启动失败', type: 'danger' as const }
+})
+
 // ==================== 自动更新（v0.4.0：GitHub Releases） ====================
 
 const appVersion = ref('')
@@ -412,6 +467,7 @@ onMounted(async () => {
   if (!settingsStore.loaded) await settingsStore.load()
   syncFromStore()
   await refreshMcpInfo()
+  await refreshWebInfo()
   unsubscribePortChanged = ipcEvents.portChanged(() => {
     void refreshMcpInfo()
     syncFromStore() // 端口/开关可能经其他入口变更，同步全量镜像
@@ -540,6 +596,57 @@ onBeforeUnmount(() => {
           <pre class="sample-json">{{ stdioSample }}</pre>
         </div>
       </div>
+    </el-card>
+
+    <el-card shadow="never" class="block-card">
+      <template #header>
+        <div class="card-header">
+          <span>浏览器访问面板</span>
+          <el-tag :type="webStatusLabel.type" size="small">{{ webStatusLabel.text }}</el-tag>
+        </div>
+      </template>
+
+      <el-alert
+        v-if="webInfo?.error"
+        type="error"
+        :closable="false"
+        show-icon
+        class="mcp-error"
+        title="浏览器面板启动失败"
+      >
+        {{ webInfo.error }}
+      </el-alert>
+
+      <el-form label-width="120px" label-position="left">
+        <el-form-item label="启用浏览器访问">
+          <el-switch
+            v-model="webEnabledLocal"
+            :loading="savingWeb"
+            @change="(value: string | number | boolean) => saveWebEnabled(Boolean(value))"
+          />
+        </el-form-item>
+        <el-form-item label="端口">
+          <el-input-number
+            v-model="webPortLocal"
+            :min="1"
+            :max="65535"
+            :disabled="savingWeb"
+            @change="(value: number | undefined) => saveWebPort(value)"
+          />
+          <div class="field-hint">仅绑定 127.0.0.1（本机访问）；默认 7790，避开 MCP 桥接探测段 7777–7786。</div>
+        </el-form-item>
+        <el-form-item label="访问地址">
+          <el-input :model-value="webInfo?.url ?? `http://127.0.0.1:${webPortLocal}`" readonly>
+            <template #append>
+              <el-button @click="copyText(webInfo?.url ?? `http://127.0.0.1:${webPortLocal}`, '访问地址')">复制</el-button>
+            </template>
+          </el-input>
+          <div class="field-hint">
+            在本机浏览器打开即是与桌面窗口完全同源的面板（同一 UI、同一主进程服务层）；
+            跨设备访问需自行做端口转发。Electron 窗口关闭不影响浏览器面板。
+          </div>
+        </el-form-item>
+      </el-form>
     </el-card>
 
     <el-card shadow="never" class="block-card">

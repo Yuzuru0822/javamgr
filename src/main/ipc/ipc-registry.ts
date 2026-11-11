@@ -22,7 +22,7 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { ZodError } from 'zod'
 import { IPC_EVENTS, IPC_REQUESTS } from '../../shared/ipc-channels'
-import { encodeIpcErrorPayload } from '../../shared/ipc-error'
+import { decodeIpcErrorPayload, encodeIpcErrorPayload } from '../../shared/ipc-error'
 import type { IpcErrorCode, StructuredIpcError } from '../../shared/ipc-error'
 import type {
   BatchResult,
@@ -39,7 +39,8 @@ import type {
   ScanProgressEvent,
   SearchParams,
   SearchResult,
-  UpdaterStatus
+  UpdaterStatus,
+  WebInfo
 } from '../../shared/types'
 import { ConfigError } from '../config/config-store'
 import type { ConfigStore } from '../config/config-store'
@@ -52,6 +53,7 @@ import {
   validateJdkPath
 } from '../jdk/jdk-scanner'
 import type { McpHostStatus } from '../mcp/mcp-host'
+import type { WebHostStatus } from '../web/web-host'
 import * as S from './schemas'
 
 // ---------- S3 注入点：进程控制 ----------
@@ -88,6 +90,8 @@ export interface IpcDependencies {
     installNow(): void
     getState(): UpdaterStatus
   }
+  /** v0.5.0 浏览器面板（index.ts 注入 WebHost；缺省按设置派生、enabled=false） */
+  webStatus?: { getWebStatus(): WebHostStatus }
 }
 
 // ---------- S4 注入点：日志服务 ----------
@@ -138,18 +142,77 @@ function toStructuredError(err: unknown, channel: string): StructuredIpcError {
 
 // ---------- 注册基建 ----------
 
-function register(channel: string, handler: (raw: unknown) => unknown): void {
-  ipcMain.handle(channel, async (_event, raw: unknown) => {
-    try {
-      return await handler(raw)
-    } catch (err) {
-      const structured = toStructuredError(err, channel)
-      if (structured.code === 'INTERNAL') {
-        console.error(`[ipc] ${channel} 未预期异常：`, err)
-      }
-      throw new Error(encodeIpcErrorPayload(structured))
+/**
+ * channel → handler 的权威映射：ipcMain.handle 与 WebHost /web/api 透传共用同一组
+ * （v0.5.0：浏览器面板是 IPC 的第三个等价客户端，零第二实现）。
+ */
+const handlerMap = new Map<string, (raw: unknown) => unknown>()
+
+/** IPC 出口统一封装（结构化错误协议），ipcMain.handle 与 WebHost 共用 */
+async function dispatch(channel: string, raw: unknown): Promise<unknown> {
+  const handler = handlerMap.get(channel)
+  if (!handler) {
+    throw new Error(
+      encodeIpcErrorPayload({
+        code: 'NOT_IMPLEMENTED',
+        message: `通道 ${channel} 未注册`
+      })
+    )
+  }
+  try {
+    return await handler(raw)
+  } catch (err) {
+    const structured = toStructuredError(err, channel)
+    if (structured.code === 'INTERNAL') {
+      console.error(`[ipc] ${channel} 未预期异常：`, err)
     }
-  })
+    throw new Error(encodeIpcErrorPayload(structured))
+  }
+}
+
+function register(channel: string, handler: (raw: unknown) => unknown): void {
+  handlerMap.set(channel, handler)
+  ipcMain.handle(channel, async (_event, raw: unknown) => dispatch(channel, raw))
+}
+
+/**
+ * WebHost 用的 IPC 透传出口：同 handler、同错误协议，但以结构化 JSON 结果返回
+ * （不走 Error.message 编码——HTTP 层直接呈现 {ok, code, message}）。
+ */
+async function callForWeb(
+  channel: string,
+  raw: unknown
+): Promise<
+  | { ok: true; data: unknown }
+  | { ok: false; code: string; message: string; details?: unknown }
+> {
+  try {
+    return { ok: true, data: await dispatch(channel, raw) }
+  } catch (err) {
+    const structured = decodeIpcErrorPayload(err instanceof Error ? err.message : String(err))
+    if (structured) {
+      return {
+        ok: false,
+        code: structured.code,
+        message: structured.message,
+        ...(structured.details !== undefined ? { details: structured.details } : {})
+      }
+    }
+    return { ok: false, code: 'INTERNAL', message: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/** registerIpcHandlers 的返回面：WebHost 注入的 IPC 透传（v0.5.0） */
+export interface IpcRegistryHandle {
+  call: typeof callForWeb
+}
+
+/** 广播事件 → 浏览器 SSE 的挂钩（index.ts 装配 WebHost 后设置；v0.5.0） */
+let webBroadcaster: ((channel: string, payload: unknown) => void) | null = null
+
+/** 装配层注入：broadcastEvent 的同时推送浏览器面板 SSE 流 */
+export function setWebBroadcaster(fn: ((channel: string, payload: unknown) => void) | null): void {
+  webBroadcaster = fn
 }
 
 /** 主进程 → 渲染进程事件广播（§2.5 Events；无窗口时静默丢弃）。导出供装配层（index.ts）接 process-manager 广播复用。 */
@@ -157,13 +220,14 @@ export function broadcastEvent(channel: typeof IPC_EVENTS[keyof typeof IPC_EVENT
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(channel, payload)
   }
+  webBroadcaster?.(channel, payload) // v0.5.0：浏览器面板同源同载荷
 }
 
 const RUNNING_STATES = new Set(['RUNNING', 'STARTING'])
 
 // ---------- 注册入口 ----------
 
-export function registerIpcHandlers(deps: IpcDependencies): void {
+export function registerIpcHandlers(deps: IpcDependencies): IpcRegistryHandle {
   const { store } = deps
   const runtimeOf = (projectId: string): ProjectRuntimeState =>
     deps.processControl?.getRuntimeState(projectId) ?? { status: 'STOPPED' }
@@ -412,6 +476,17 @@ export function registerIpcHandlers(deps: IpcDependencies): void {
     deps.updater?.getState() ?? { state: 'error', error: '更新模块未装配' }
   )
 
+  register(IPC_REQUESTS.WEB_GET_INFO, (): WebInfo => {
+    const settings = store.getSettings()
+    const status = deps.webStatus?.getWebStatus()
+    return {
+      enabled: status?.enabled ?? false,
+      port: status?.port ?? settings.webPort, // 契约端口：失败时也展示设定值
+      url: status?.url ?? `http://127.0.0.1:${settings.webPort}`,
+      ...(status?.error !== undefined ? { error: status.error } : {})
+    }
+  })
+
   register(IPC_REQUESTS.APP_PICK_FILE, async (raw): Promise<string | null> => {
     const { title, directory, filters } = S.pickFileSchema.parse(raw)
     const result = await dialog.showOpenDialog({
@@ -422,4 +497,6 @@ export function registerIpcHandlers(deps: IpcDependencies): void {
     if (result.canceled || result.filePaths.length === 0) return null
     return result.filePaths[0] ?? null
   })
+
+  return { call: callForWeb } // v0.5.0：WebHost 透传出口（与 ipcMain 同组 handler）
 }

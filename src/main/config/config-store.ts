@@ -57,7 +57,9 @@ export const DEFAULT_SETTINGS: Readonly<Settings> = Object.freeze({
   logMaxRotations: 3,
   logRunsToKeep: 10,
   scanRoots: [],
-  closeToTray: true
+  closeToTray: true,
+  webEnabled: true,
+  webPort: 7790
 })
 
 // ---------- 结构校验（加载时形状闸门：过不了 = 视为损坏走备份重建） ----------
@@ -132,7 +134,9 @@ function validateSettingsShape(v: unknown): Partial<Settings> | null {
     !isOptional(v['logMaxRotations'], (x) => typeof x === 'number') ||
     !isOptional(v['logRunsToKeep'], (x) => typeof x === 'number') ||
     !isOptional(v['scanRoots'], isStringArray) ||
-    !isOptional(v['closeToTray'], (x) => typeof x === 'boolean')
+    !isOptional(v['closeToTray'], (x) => typeof x === 'boolean') ||
+    !isOptional(v['webEnabled'], (x) => typeof x === 'boolean') ||
+    !isOptional(v['webPort'], (x) => typeof x === 'number' && Number.isInteger(x))
   ) {
     return null
   }
