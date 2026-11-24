@@ -172,7 +172,7 @@ function statusText(status: ProjectWithRuntime['status']): string {
         >
           构建
         </el-button>
-        <el-button :disabled="isRunningLike(row.status)" size="small" link @click="emit('restart', row.id)">
+        <el-button :disabled="!isRunningLike(row.status)" size="small" link @click="emit('restart', row.id)">
           重启
         </el-button>
         <el-button size="small" link @click="emit('logs', row)">日志</el-button>
