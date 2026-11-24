@@ -21,8 +21,9 @@
 ## 功能
 
 - **项目面板**：卡片 / 分页列表双视图（工具栏右上角切换）；按名称、状态、运行时间、PID 排序（列表表头与工具栏控件互通，卡片视图同样生效）；勾选多个批量启动/重启/停止
+- **Maven 管理**：注册多套 Maven（自动探测 M2_HOME / MAVEN_HOME / PATH 或手动添加）；每套可配 settings.xml 与本地仓库路径（从 settings.xml 的 localRepository 一键采纳）；项目编辑对话框「构建配置」tab 绑定 Maven 与构建命令（如 clean package -DskipTests）
 - **扫描导入**：选目录递归收集 jar → 勾选 → 批量命名 / 指派 JDK → 一键纳管（已纳管自动标注）
-- **日志**：实时滚动 + 级别/关键字过滤 + 上下文检索；logback 文件 tail（跟随轮转）或 stdout 捕获（GBK/UTF-8 自动判定）持久化到 `%APPDATA%/javamgr/logs/`
+- **日志**：实时滚动 + 级别/关键字过滤 + 上下文检索；logback 文件 tail（跟随轮转）或 stdout 捕获（GBK/UTF-8 自动判定）持久化到 `%APPDATA%/javamgr/logs/`；stdout 日志按保留天数（默认 7 天）与全局目标上限（默认 512 MiB）自动回收，设置页可查看用量、手动清理，并可把后续日志迁到其他盘（自定义存储目录）
 - **浏览器面板**：本机浏览器开 `http://127.0.0.1:7790`，与桌面窗口同一 UI（默认开，仅绑定 127.0.0.1；跨设备自行做 SSH 端口转发）
 - **自动更新**：设置页「检查更新」→ 差量下载（blockmap 只传变化块）→ 重启静默安装，更新期间托管 java 进程零中断
 
@@ -52,9 +53,9 @@ stdio（不含端口、永远有效——自动发现主实例）：
 
 （设置页有以上样例与一键复制，以设置页展示为准。）
 
-**15 个工具**（与 GUI 同源等价）：
+**16 个工具**（与 GUI 同源等价）：
 
-- 查询：`list_projects`（含实时状态）/ `get_status` / `list_jdks`
+- 查询：`list_projects`（含实时状态）/ `get_status` / `list_jdks` / `list_mavens`
 - 启停：`start_project`（幂等）/ `stop_project`（杀进程树）/ `restart_project`（原子组合）/ `start_all_projects` / `stop_all_projects`
 - 项目管理：`create_project` / `update_project`（部分更新，缺省沿用现值）/ `delete_project`（运行中须 `confirm=true`：先停再删）
 - 日志：`read_logs` / `search_logs`（keyword / level / 时间窗 / 上下文）
@@ -126,12 +127,13 @@ src/shared/          主/渲染/preload 共享类型与 IPC 通道常量（零�
 src/main/            主进程（唯一权威状态源）
   ├ process/         状态机 + projectId 操作队列 + 杀树 + PID 重识别轮询池
   ├ log/             file|stdout 双路由、编码自动判定、10MB 轮转、检索
-  ├ mcp/             MCP 宿主（契约端口）+ 15 工具 + stdio 桥接
+  ├ mcp/             MCP 宿主（契约端口）+ 16 工具 + stdio 桥接
   ├ jdk/             JDK 扫描（标准根目录 + JAVA_HOME + 自定义根）
+  ├ maven/           Maven 探测/校验（版本走 lib jar 文件名，settings.xml 解析仓库建议）
   ├ jar/             jar 递归扫描导入
   ├ config/          projects/jdks/settings.json（原子写 + 损坏备份重建）
   └ telemetry/       event loop 延迟打点（设置页可查看）
-src/renderer/        Vue 3 控制台（项目面板 / JDK 管理 / 设置）
+src/renderer/        Vue 3 控制台（项目面板 / JDK 管理 / Maven 管理 / 设置）
 scripts/fixtures/    Loggy.java 测试夹具
 tests/unit/          纯 Node 单测（mock taskkill/spawn）
 tests/integration/   真实进程集成测试（真实 javac/taskkill + MCP SDK Client）
@@ -145,6 +147,7 @@ tests/integration/   真实进程集成测试（真实 javac/taskkill + MCP SDK 
 - **启动判定**：首条日志输出即 RUNNING；无输出满 `startupGraceSeconds`（默认 5s）兜底转 RUNNING
 - **退出策略**（默认 keep）：keep = 子进程保持运行，重启工具后按 runs.json（PID + 启动时间）重识别；stopAll = 退出前逐项目杀树
 - **日志**：配置 logFilePath 则 tail 文件（跟随 rename 轮转/截断/删除重建），否则捕获 stdout（GBK/UTF-8 首个非 ASCII 序列才锁编码；项目级覆盖逃生口），10MB 轮转、run 数可配
+- **日志占用治理**：stdout 落盘按保留天数（默认 7 天）与全局目标上限（默认 512 MiB）自动回收非活动 run（活动 run 只轮转不强删）；启动、每小时、设置保存与进程结束时触发；设置页可查看当前用量并手动清理；存储目录可自定义（重启生效，不自动迁移历史）
 
 ## 已知限制（ADR Consequences，显式接受）
 

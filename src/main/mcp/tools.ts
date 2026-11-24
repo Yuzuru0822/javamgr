@@ -28,6 +28,7 @@ import type {
   BatchResult,
   JarScanResult,
   Jdk,
+  Maven,
   OpResult,
   Project,
   ProjectInput,
@@ -76,6 +77,7 @@ export interface McpToolServices {
   store: {
     listProjects(): Project[]
     listJdks(): Jdk[]
+    listMavens(): Maven[]
     createProject(input: ProjectInput): Promise<Project>
     updateProject(input: ProjectInput & { id: string }): Promise<Project>
     deleteProject(id: string): Promise<Project>
@@ -228,7 +230,22 @@ const toolSchemas = {
     encodingOverride: z
       .enum(['auto', 'utf8', 'gbk'])
       .optional()
-      .describe('可选：stdout 编码覆盖（auto=自动检测）')
+      .describe('可选：stdout 编码覆盖（auto=自动检测）'),
+    mavenId: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('可选：绑定的 Maven id（构建配置；可用 list_mavens 查询候选）'),
+    buildCommand: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('可选：maven 构建命令（如 clean package -DskipTests），依赖 mavenId'),
+    buildDir: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('可选：构建工作目录（含 pom.xml）；缺省自动：jar 在 target\\ 下取上级，否则 jar 所在目录')
   },
   update_project: {
     project: projectArg,
@@ -248,6 +265,24 @@ const toolSchemas = {
       .enum(['auto', 'utf8', 'gbk'])
       .nullable()
       .describe('stdout 编码覆盖；null=清除；缺省=不变')
+      .optional(),
+    mavenId: z
+      .string()
+      .min(1)
+      .nullable()
+      .describe('新绑定的 Maven id（可用 list_mavens 查询候选）；null=清除构建绑定；缺省=不变')
+      .optional(),
+    buildCommand: z
+      .string()
+      .min(1)
+      .nullable()
+      .describe('新构建命令；null=清除；缺省=不变')
+      .optional(),
+    buildDir: z
+      .string()
+      .min(1)
+      .nullable()
+      .describe('新构建工作目录；null=清除（回到自动推断）；缺省=不变')
       .optional()
   },
   delete_project: {
@@ -289,9 +324,9 @@ const toolSchemas = {
 // ---------- 工具注册 ----------
 
 /**
- * 在 McpServer 实例上注册全部 15 工具（§2.6 原始 7 工具 + 2026-11-10 面板同款补齐 6 工具
- * + 扫描导入流程 2 工具 scan_jars/batch_create_projects）。
- * server 实例由调用方构造（mcp-host）或用 {@link createJavamgrMcpServer} 一并构造。
+ * 在 McpServer 实例上注册全部 16 工具（§2.6 原始 7 工具 + 2026-11-10 面板同款补齐 6 工具
+ * + 扫描导入流程 2 工具 scan_jars/batch_create_projects + 2026-11-18 构建配置 1 工具
+ * list_mavens）。server 实例由调用方构造（mcp-host）或用 {@link createJavamgrMcpServer} 一并构造。
  */
 export function registerMcpTools(server: McpServer, services: McpToolServices): void {
   const { store, processControl, logService } = services
@@ -481,6 +516,28 @@ export function registerMcpTools(server: McpServer, services: McpToolServices): 
     }
   )
 
+  // ===== list_mavens（create/update_project 构建配置的 mavenId 候选来源；GUI 构建配置 tab 下拉的等价物，2026-11-18） =====
+  server.registerTool(
+    'list_mavens',
+    {
+      title: '列出 Maven',
+      description:
+        '列出全部已注册 Maven（id/名称/路径/版本/settings.xml/本地仓库）。create_project / update_project 构建配置的 mavenId 从此处获取；项目的 buildCommand（如 clean package -DskipTests）配合此 mavenId 使用。'
+    },
+    async () => {
+      const mavens = store.listMavens().map((m) => ({
+        id: m.id,
+        name: m.name,
+        homePath: m.homePath,
+        version: m.version,
+        ...(m.settingsPath !== undefined ? { settingsPath: m.settingsPath } : {}),
+        ...(m.localRepoPath !== undefined ? { localRepoPath: m.localRepoPath } : {}),
+        source: m.source
+      }))
+      return toolResult({ mavens })
+    }
+  )
+
   /** jdkId 守卫：GUI 表单经下拉框结构性保证只选已注册 JDK，MCP 侧显式校验并回候选列表 */
   function checkJdkId(jdkId: string): CallToolResult | null {
     const jdk = store.listJdks().find((j) => j.id === jdkId)
@@ -499,6 +556,24 @@ export function registerMcpTools(server: McpServer, services: McpToolServices): 
     )
   }
 
+  /** mavenId 守卫：GUI 构建配置下拉经结构性保证只选已注册 Maven，MCP 侧显式校验并回候选列表 */
+  function checkMavenId(mavenId: string): CallToolResult | null {
+    const maven = store.listMavens().find((m) => m.id === mavenId)
+    if (maven) return null
+    const candidates = store
+      .listMavens()
+      .map((m) => `${m.name}（id=${m.id}）`)
+      .join('、')
+    return toolResult(
+      {
+        error: `mavenId「${mavenId}」未注册。${
+          candidates ? `可用 Maven：${candidates}` : '当前没有已注册 Maven，请先在面板 Maven 页添加。'
+        }`
+      },
+      true
+    )
+  }
+
   // ===== create_project（新建项目；与 GUI「新建项目」表单同一 config-store 落库） =====
   server.registerTool(
     'create_project',
@@ -511,6 +586,10 @@ export function registerMcpTools(server: McpServer, services: McpToolServices): 
     async (input) => {
       const invalidJdk = checkJdkId(input.jdkId)
       if (invalidJdk) return invalidJdk
+      if (input.mavenId !== undefined) {
+        const invalidMaven = checkMavenId(input.mavenId)
+        if (invalidMaven) return invalidMaven
+      }
       try {
         const project = await store.createProject({
           name: input.name,
@@ -522,7 +601,10 @@ export function registerMcpTools(server: McpServer, services: McpToolServices): 
           ...(input.logFilePath !== undefined ? { logFilePath: input.logFilePath } : {}),
           ...(input.encodingOverride !== undefined
             ? { encodingOverride: input.encodingOverride }
-            : {})
+            : {}),
+          ...(input.mavenId !== undefined ? { mavenId: input.mavenId } : {}),
+          ...(input.buildCommand !== undefined ? { buildCommand: input.buildCommand } : {}),
+          ...(input.buildDir !== undefined ? { buildDir: input.buildDir } : {})
         })
         return toolResult({ created: project, hint: '可用 start_project 启动' })
       } catch (err) {
@@ -551,6 +633,14 @@ export function registerMcpTools(server: McpServer, services: McpToolServices): 
         const invalidJdk = checkJdkId(input.jdkId)
         if (invalidJdk) return invalidJdk
       }
+      if (
+        input.mavenId !== undefined &&
+        input.mavenId !== null &&
+        input.mavenId !== existing.mavenId
+      ) {
+        const invalidMaven = checkMavenId(input.mavenId)
+        if (invalidMaven) return invalidMaven
+      }
       /** 可选字段三元合并（保留字面量类型）：显式值 → 现值保留 → null 清除 */
       const optionalField = <T extends string>(
         provided: T | null | undefined,
@@ -562,6 +652,9 @@ export function registerMcpTools(server: McpServer, services: McpToolServices): 
       }
       const logFilePath = optionalField(input.logFilePath, existing.logFilePath)
       const encodingOverride = optionalField(input.encodingOverride, existing.encodingOverride)
+      const mavenId = optionalField(input.mavenId, existing.mavenId)
+      const buildCommand = optionalField(input.buildCommand, existing.buildCommand)
+      const buildDir = optionalField(input.buildDir, existing.buildDir)
       try {
         const updated = await store.updateProject({
           id: existing.id,
@@ -572,7 +665,10 @@ export function registerMcpTools(server: McpServer, services: McpToolServices): 
           programArgs: input.programArgs ?? existing.programArgs,
           envVars: input.envVars ?? existing.envVars,
           ...('set' in logFilePath ? { logFilePath: logFilePath.set } : {}),
-          ...('set' in encodingOverride ? { encodingOverride: encodingOverride.set } : {})
+          ...('set' in encodingOverride ? { encodingOverride: encodingOverride.set } : {}),
+          ...('set' in mavenId ? { mavenId: mavenId.set } : {}),
+          ...('set' in buildCommand ? { buildCommand: buildCommand.set } : {}),
+          ...('set' in buildDir ? { buildDir: buildDir.set } : {})
         })
         if ((existing.logFilePath ?? '') !== (updated.logFilePath ?? '')) {
           logService.switchRoute(existing.id) // 与 IPC projects:update 同款：路径变更即时切换
@@ -756,7 +852,7 @@ export function createJavamgrMcpServer(
     { name: JAVAMGR_SERVER_NAME, version },
     {
       instructions:
-        'Windows Java 进程管理器：纳管预构建 jar 项目的启停/状态/日志，支持新建/编辑/删除项目与全部启动/停止（与 GUI 面板同源等价）；批量导入流程：scan_jars 扫描目录 → batch_create_projects 批量纳管。project 参数支持 id、精确名称、大小写不敏感名称或唯一前缀；jdkId 用 list_jdks 查询。'
+        'Windows Java 进程管理器：纳管预构建 jar 项目的启停/状态/日志，支持新建/编辑/删除项目与全部启动/停止（与 GUI 面板同源等价）；批量导入流程：scan_jars 扫描目录 → batch_create_projects 批量纳管。project 参数支持 id、精确名称、大小写不敏感名称或唯一前缀；jdkId 用 list_jdks 查询，构建配置 mavenId 用 list_mavens 查询。'
     }
   )
   registerMcpTools(server, services)

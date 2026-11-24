@@ -16,6 +16,11 @@ const router = createRouter({
       component: () => import('@renderer/views/JdkView.vue')
     },
     {
+      path: '/maven',
+      name: 'maven',
+      component: () => import('@renderer/views/MavenView.vue')
+    },
+    {
       path: '/settings',
       name: 'settings',
       component: () => import('@renderer/views/SettingsView.vue')

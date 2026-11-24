@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { EventLoopMetrics, McpInfo, UpdaterStatus, WebInfo } from '@shared/types'
+import type {
+  EventLoopMetrics,
+  LogCleanupResult,
+  LogCleanupScope,
+  LogStorageInfo,
+  McpInfo,
+  UpdaterStatus,
+  WebInfo
+} from '@shared/types'
 import { ipc, ipcEvents } from '@renderer/api/ipc'
 import { useSettingsStore } from '@renderer/stores/settings'
 
@@ -12,7 +20,8 @@ import { useSettingsStore } from '@renderer/stores/settings'
  * - 运行状况（N-6）：主进程事件循环延迟打点（P95/最近/样本数 + 演进条件提示）；
  * - 退出策略（keep 默认 | stopAll，切换二次确认）；
  * - 启动与轮询：startupGraceSeconds / pollIntervalSeconds（5–10）；
- * - 日志保留：tailInitialLines / 单文件 MB / 轮转保留数 / run 保留数；
+ * - 日志保留：tailInitialLines / 单文件 MB / 轮转保留数 / run 保留数 /
+ *   7 天与 512MiB 全局保留策略、自定义 stdout 存储目录、用量查看与手动清理；
  * - JDK 扫描根目录管理（增删，叠加默认根 + JAVA_HOME）；
  * - 关闭行为：关闭到托盘。
  * 保存全部即时生效（settings:set 局部合并 + 变更即写盘）；各项热生效性在提示文案注明
@@ -123,6 +132,9 @@ function syncFromStore(): void {
   logMbLocal.value = s.logMaxFileMb
   rotationsLocal.value = s.logMaxRotations
   runsKeepLocal.value = s.logRunsToKeep
+  retentionDaysLocal.value = s.logRetentionDays
+  maxTotalMbLocal.value = s.logMaxTotalMb
+  stdoutLogDirLocal.value = s.stdoutLogDir
   scanRootsLocal.value = [...s.scanRoots]
   closeToTrayLocal.value = s.closeToTray
 }
@@ -202,23 +214,147 @@ async function saveTailLines(value: number | undefined): Promise<void> {
 
 async function saveLogMb(value: number | undefined): Promise<void> {
   if (value === undefined || value === settingsStore.settings?.logMaxFileMb) return
-  await savePatch({ logMaxFileMb: value }, `单文件上限已改为 ${value}MB（即时生效，超出轮转）`, () => {
+  const ok = await savePatch({ logMaxFileMb: value }, `单文件上限已改为 ${value}MB（即时生效，超出轮转）`, () => {
     logMbLocal.value = settingsStore.settings?.logMaxFileMb ?? 10
   })
+  if (ok) await refreshLogStorage()
 }
 
 async function saveRotations(value: number | undefined): Promise<void> {
   if (value === undefined || value === settingsStore.settings?.logMaxRotations) return
-  await savePatch({ logMaxRotations: value }, `每 run 轮转保留数已改为 ${value}（即时生效）`, () => {
+  const ok = await savePatch({ logMaxRotations: value }, `每 run 轮转保留数已改为 ${value}（即时生效）`, () => {
     rotationsLocal.value = settingsStore.settings?.logMaxRotations ?? 3
   })
+  if (ok) await refreshLogStorage()
 }
 
 async function saveRunsKeep(value: number | undefined): Promise<void> {
   if (value === undefined || value === settingsStore.settings?.logRunsToKeep) return
-  await savePatch({ logRunsToKeep: value }, `每项目保留 run 数已改为 ${value}（即时生效）`, () => {
+  const ok = await savePatch({ logRunsToKeep: value }, `每项目保留 run 数已改为 ${value}（即时生效）`, () => {
     runsKeepLocal.value = settingsStore.settings?.logRunsToKeep ?? 10
   })
+  if (ok) await refreshLogStorage()
+}
+
+const retentionDaysLocal = ref(7)
+const maxTotalMbLocal = ref(512)
+const stdoutLogDirLocal = ref('')
+const logStorage = ref<LogStorageInfo | null>(null)
+const logStorageLoadError = ref('')
+const cleaningLogs = ref(false)
+const lastCleanup = ref<LogCleanupResult | null>(null)
+const cleanupRequestError = ref('')
+
+/** 存储信息/后台清理错误只在卡片内呈现，避免周期性后台失败反复弹窗。 */
+async function refreshLogStorage(): Promise<void> {
+  try {
+    logStorage.value = await ipc.logs.getStorageInfo()
+    logStorageLoadError.value = ''
+  } catch (err) {
+    logStorageLoadError.value = errText(err)
+  }
+}
+
+async function saveRetentionDays(value: number | undefined): Promise<void> {
+  if (value === undefined || value === settingsStore.settings?.logRetentionDays) return
+  const ok = await savePatch(
+    { logRetentionDays: value },
+    `stdout 日志保留天数已改为 ${value} 天（即时生效）`,
+    () => {
+      retentionDaysLocal.value = settingsStore.settings?.logRetentionDays ?? 7
+    }
+  )
+  if (ok) await refreshLogStorage()
+}
+
+async function saveMaxTotalMb(value: number | undefined): Promise<void> {
+  if (value === undefined || value === settingsStore.settings?.logMaxTotalMb) return
+  const ok = await savePatch(
+    { logMaxTotalMb: value },
+    `stdout 日志全局目标上限已改为 ${value} MiB（即时生效）`,
+    () => {
+      maxTotalMbLocal.value = settingsStore.settings?.logMaxTotalMb ?? 512
+    }
+  )
+  if (ok) await refreshLogStorage()
+}
+
+async function persistStdoutLogDir(next: string, successText: string): Promise<void> {
+  const prev = settingsStore.settings?.stdoutLogDir ?? ''
+  if (next === prev) return
+  stdoutLogDirLocal.value = next
+  const ok = await savePatch({ stdoutLogDir: next }, successText, () => {
+    stdoutLogDirLocal.value = prev
+  })
+  if (ok) {
+    // 主进程可能做了去空白/分隔符规范化，本地镜像以保存返回值为准。
+    stdoutLogDirLocal.value = settingsStore.settings?.stdoutLogDir ?? ''
+    await refreshLogStorage()
+  }
+}
+
+async function chooseStdoutLogDir(): Promise<void> {
+  try {
+    const selected = await ipc.app.pickFile({
+      title: '选择 stdout 日志存储父目录（实际写入其 javamgr-logs 子目录）',
+      directory: true
+    })
+    if (selected === null) return
+    await persistStdoutLogDir(selected, 'stdout 日志父目录已保存，重启管理器后生效')
+  } catch (err) {
+    ElMessage.error(`选择日志目录失败：${errText(err)}`)
+  }
+}
+
+async function restoreDefaultStdoutLogDir(): Promise<void> {
+  await persistStdoutLogDir('', '已恢复默认 stdout 日志目录，重启管理器后生效')
+}
+
+const legacyCleanupAvailable = computed(() => {
+  const info = logStorage.value
+  if (!info) return false
+  const normalize = (value: string): string => value.replace(/[\\/]+$/, '').toLowerCase()
+  return normalize(info.logsDir) !== normalize(info.defaultLogsDir)
+})
+
+async function cleanupLogs(scope: LogCleanupScope = 'current'): Promise<void> {
+  if (cleaningLogs.value) return
+  if (scope === 'legacyDefault') {
+    const legacyDir = logStorage.value?.defaultLogsDir ?? '旧默认目录'
+    const confirmed = await ElMessageBox.confirm(
+      `将删除旧默认目录「${legacyDir}」内全部 javamgr stdout 历史日志，包括仍在保留期内的文件；` +
+        '未知文件与链接会严格跳过，不会删除或检索项目外部 logback 日志。此操作不可撤销，确定继续吗？',
+      '清理旧默认目录日志',
+      { confirmButtonText: '确认全部删除', cancelButtonText: '取消', type: 'warning' }
+    )
+      .then(() => true)
+      .catch(() => false)
+    if (!confirmed) return
+  }
+
+  cleaningLogs.value = true
+  cleanupRequestError.value = ''
+  lastCleanup.value = null
+  try {
+    const result = await ipc.logs.cleanup(scope)
+    lastCleanup.value = result
+    await refreshLogStorage()
+    if (result.errors.length === 0) {
+      ElMessage.success(
+        `清理完成：释放 ${formatBytes(result.freedBytes)}，剩余 ${formatBytes(result.remainingBytes)}`
+      )
+    }
+  } catch (err) {
+    cleanupRequestError.value = errText(err)
+  } finally {
+    cleaningLogs.value = false
+  }
+}
+
+function formatCleanupTime(value: string | undefined): string {
+  if (!value) return '尚未执行'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
 
 // ==================== 扫描根目录管理（下次扫描生效） ====================
@@ -468,6 +604,7 @@ onMounted(async () => {
   syncFromStore()
   await refreshMcpInfo()
   await refreshWebInfo()
+  await refreshLogStorage()
   unsubscribePortChanged = ipcEvents.portChanged(() => {
     void refreshMcpInfo()
     syncFromStore() // 端口/开关可能经其他入口变更，同步全量镜像
@@ -757,6 +894,30 @@ onBeforeUnmount(() => {
 
     <el-card shadow="never" class="block-card">
       <template #header><span>日志保留</span></template>
+
+      <el-alert
+        v-if="logStorage?.storageError || logStorageLoadError || cleanupRequestError"
+        type="error"
+        :closable="false"
+        show-icon
+        class="log-alert"
+        title="stdout 日志存储或清理异常"
+      >
+        <div v-if="logStorage?.storageError">{{ logStorage.storageError }}</div>
+        <div v-if="logStorageLoadError">读取存储信息失败：{{ logStorageLoadError }}</div>
+        <div v-if="cleanupRequestError">清理请求失败：{{ cleanupRequestError }}</div>
+      </el-alert>
+      <el-alert
+        v-if="logStorage && logStorage.errors.length > 0"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="log-alert"
+        title="后台日志维护存在部分失败（不会重复弹窗）"
+      >
+        <div v-for="error in logStorage.errors" :key="error" class="log-error-item">{{ error }}</div>
+      </el-alert>
+
       <el-form label-width="200px" label-position="left">
         <el-form-item label="初始回读行数">
           <el-input-number
@@ -796,9 +957,105 @@ onBeforeUnmount(() => {
             :disabled="saving"
             @change="(value: number | undefined) => saveRunsKeep(value)"
           />
-          <div class="field-hint">每项目保留最近 N 个 run 的日志（更早清理，即时生效）。</div>
+          <div class="field-hint">每项目保留最近 N 个历史 run 的日志（活动 run 不计入保留数，更早清理，即时生效）。</div>
+        </el-form-item>
+        <el-form-item label="stdout 保留天数">
+          <el-input-number
+            v-model="retentionDaysLocal"
+            :min="1"
+            :max="365"
+            :disabled="saving"
+            class="retention-days-input"
+            @change="(value: number | undefined) => saveRetentionDays(value)"
+          />
+          <div class="field-hint">默认 7 天，按文件修改时间清理；活动日志文件不会按天数强删（即时生效）。</div>
+        </el-form-item>
+        <el-form-item label="全局目标上限（MiB）">
+          <el-input-number
+            v-model="maxTotalMbLocal"
+            :min="1"
+            :max="1048576"
+            :disabled="saving"
+            class="max-total-mb-input"
+            @change="(value: number | undefined) => saveMaxTotalMb(value)"
+          />
+          <div class="field-hint">默认 512 MiB。超出后优先清理最旧的非活动 stdout 文件；活动文件计入占用（即时生效）。</div>
+        </el-form-item>
+        <el-form-item label="stdout 存储父目录">
+          <div class="log-dir-picker">
+            <el-input
+              v-model="stdoutLogDirLocal"
+              readonly
+              placeholder="默认（userData/logs）"
+              class="stdout-parent-input"
+            />
+            <el-button :disabled="saving" class="choose-stdout-dir" @click="chooseStdoutLogDir">
+              选择目录
+            </el-button>
+            <el-button
+              :disabled="saving || stdoutLogDirLocal === ''"
+              class="restore-stdout-dir"
+              @click="restoreDefaultStdoutLogDir"
+            >
+              恢复默认
+            </el-button>
+          </div>
+          <div class="field-hint">
+            自定义时实际写入所选父目录下的 javamgr-logs；保存前验证绝对路径与可写性，重启管理器后生效，不自动迁移历史。
+          </div>
+        </el-form-item>
+        <el-form-item label="当前实际目录">
+          <el-input :model-value="logStorage?.logsDir ?? '暂不可用'" readonly class="actual-log-dir" />
+          <div class="field-hint">目录切换重启前仍只读写此处；默认目录保留为 legacyDefault 显式清理目标。</div>
+        </el-form-item>
+        <el-form-item label="stdout 用量">
+          <div class="log-usage">
+            <span>总占用 {{ logStorage ? formatBytes(logStorage.totalBytes) : '—' }}</span>
+            <span>活动文件 {{ logStorage ? formatBytes(logStorage.activeBytes) : '—' }}</span>
+            <span>上次清理 {{ formatCleanupTime(logStorage?.lastCleanupAt) }}</span>
+          </div>
+          <div v-for="error in logStorage?.errors ?? []" :key="error" class="cleanup-error">
+            {{ error }}
+          </div>
+        </el-form-item>
+        <el-form-item label="日志清理">
+          <div class="log-cleanup-actions">
+            <el-button
+              type="primary"
+              plain
+              :loading="cleaningLogs"
+              :disabled="saving"
+              class="cleanup-current"
+              @click="cleanupLogs()"
+            >
+              立即清理当前目录
+            </el-button>
+            <el-button
+              v-if="legacyCleanupAvailable"
+              type="danger"
+              plain
+              :loading="cleaningLogs"
+              :disabled="saving"
+              class="cleanup-legacy"
+              @click="cleanupLogs('legacyDefault')"
+            >
+              清理旧默认目录日志
+            </el-button>
+          </div>
+          <div class="field-hint">
+            当前目录仅按保留策略清理；旧默认目录按钮需二次确认，会删除旧默认根内全部 javamgr stdout 历史，不动外部 logback。
+          </div>
         </el-form-item>
       </el-form>
+
+      <div v-if="lastCleanup" class="cleanup-result">
+        <div>
+          最近清理（{{ lastCleanup.scope === 'current' ? '当前目录' : '旧默认目录' }}）：
+          释放 {{ formatBytes(lastCleanup.freedBytes) }}，删除 {{ lastCleanup.deletedFiles }} 个文件，
+          剩余 {{ formatBytes(lastCleanup.remainingBytes) }}（活动文件 {{ formatBytes(lastCleanup.activeBytes) }}）。
+        </div>
+        <div v-for="error in lastCleanup.errors" :key="error" class="cleanup-error">{{ error }}</div>
+      </div>
     </el-card>
 
     <el-card shadow="never" class="block-card">
@@ -965,6 +1222,52 @@ onBeforeUnmount(() => {
 .roots-add {
   display: flex;
   gap: 8px;
+}
+
+.log-alert {
+  margin-bottom: 12px;
+}
+
+.log-error-item,
+.cleanup-error {
+  margin-top: 4px;
+  word-break: break-all;
+}
+
+.log-dir-picker,
+.log-cleanup-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  flex-wrap: wrap;
+}
+
+.log-dir-picker .el-input {
+  flex: 1;
+  min-width: 240px;
+}
+
+.log-usage {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+  line-height: 32px;
+}
+
+.cleanup-result {
+  padding: 10px 12px;
+  border-radius: 4px;
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.cleanup-error {
+  color: var(--el-color-danger);
 }
 
 .perf-desc {

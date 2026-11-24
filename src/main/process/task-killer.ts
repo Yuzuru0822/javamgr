@@ -117,9 +117,17 @@ const CIM_OP_TIMEOUT_SEC = 1
 /** 后代枚举最大深度（防父链 pid 复用成环） */
 const WALK_MAX_DEPTH = 8
 
-/** 统一 PowerShell 执行入口（超时由 runner 强杀助手，绝不挂死堆积） */
+/**
+ * 统一 PowerShell 执行入口（超时由 runner 强杀助手，绝不挂死堆积）。
+ * -WindowStyle Hidden 为窗口双保险：spawn 的 windowsHide（CREATE_NO_WINDOW）在个别宿主
+ * （杀软/零信任客户端注入、终端会话差异）下可能失效导致闪窗，让 PowerShell 自身再藏一次。
+ */
 function runPowerShell(cmd: string, timeoutMs: number, runner: CommandRunner): Promise<RunResult> {
-  return runner.run('powershell', ['-NoProfile', '-NonInteractive', '-Command', cmd], timeoutMs)
+  return runner.run(
+    'powershell',
+    ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', cmd],
+    timeoutMs
+  )
 }
 
 // ---------- Get-Process 行协议（`pid|ProcessName|ISO-StartTime`，PSAPI 非 WMI） ----------

@@ -449,7 +449,15 @@ export class ProcessManager {
       ...(child.stderr !== null ? { stderr: child.stderr } : {})
     }
     if (this.logHooks.onRunStarted) {
-      this.logHooks.onRunStarted(event)
+      try {
+        this.logHooks.onRunStarted(event)
+      } catch (err) {
+        // 日志侧异常不得中断启动：子进程已 detached 运行，异常抛出会导致它成为无主进程
+        // （runs.json 尚未落盘，重启后不再被重识别）。降级为排空管道 + 记录错误。
+        console.error(`[process-manager] 日志交接失败（${projectId}，不影响本次启动）：`, err)
+        child.stdout?.resume()
+        child.stderr?.resume()
+      }
     } else {
       // 无人消费时排空管道，防 Java 进程写满缓冲区阻塞（S4 接入后由 log 模块消费）
       child.stdout?.resume()

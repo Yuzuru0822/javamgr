@@ -19,13 +19,14 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { AppPaths } from './paths'
-import type { Jdk, Project, ProjectInput, Settings } from '../../shared/types'
+import type { Jdk, Maven, Project, ProjectInput, Settings } from '../../shared/types'
 
 // ---------- 事件 ----------
 
 export const CONFIG_EVENTS = {
   PROJECTS_CHANGED: 'projects:changed',
   JDKS_CHANGED: 'jdks:changed',
+  MAVENS_CHANGED: 'mavens:changed',
   SETTINGS_CHANGED: 'settings:changed'
 } as const
 
@@ -56,6 +57,9 @@ export const DEFAULT_SETTINGS: Readonly<Settings> = Object.freeze({
   logMaxFileMb: 10,
   logMaxRotations: 3,
   logRunsToKeep: 10,
+  logRetentionDays: 7,
+  logMaxTotalMb: 512,
+  stdoutLogDir: '',
   scanRoots: [],
   closeToTray: true,
   webEnabled: true,
@@ -91,7 +95,10 @@ function validateProject(v: unknown): Project | null {
     isStringArray(v['programArgs']) &&
     isStringRecord(v['envVars']) &&
     isOptional(v['logFilePath'], isString) &&
-    (v['encodingOverride'] === undefined || ENCODINGS.has(v['encodingOverride'] as string))
+    (v['encodingOverride'] === undefined || ENCODINGS.has(v['encodingOverride'] as string)) &&
+    isOptional(v['mavenId'], isString) &&
+    isOptional(v['buildCommand'], isString) &&
+    isOptional(v['buildDir'], isString)
   return ok ? (v as unknown as Project) : null
 }
 
@@ -114,7 +121,25 @@ function validateJdk(v: unknown): Jdk | null {
 
 function validateJdks(v: unknown): Jdk[] | null {
   if (!Array.isArray(v)) return null
-  return v.every(validateJdk) ? (v as Jdk[]) : null
+  return v.every(validateJdk) ? (v as unknown as Jdk[]) : null
+}
+
+function validateMaven(v: unknown): Maven | null {
+  if (!isRecord(v)) return null
+  const ok =
+    isString(v['id']) &&
+    isString(v['name']) &&
+    isString(v['homePath']) &&
+    isString(v['version']) &&
+    isOptional(v['settingsPath'], isString) &&
+    isOptional(v['localRepoPath'], isString) &&
+    (v['source'] === 'scan' || v['source'] === 'manual')
+  return ok ? (v as unknown as Maven) : null
+}
+
+function validateMavens(v: unknown): Maven[] | null {
+  if (!Array.isArray(v)) return null
+  return v.every(validateMaven) ? (v as unknown as Maven[]) : null
 }
 
 /**
@@ -133,6 +158,9 @@ function validateSettingsShape(v: unknown): Partial<Settings> | null {
     !isOptional(v['logMaxFileMb'], (x) => typeof x === 'number') ||
     !isOptional(v['logMaxRotations'], (x) => typeof x === 'number') ||
     !isOptional(v['logRunsToKeep'], (x) => typeof x === 'number') ||
+    !isOptional(v['logRetentionDays'], (x) => typeof x === 'number') ||
+    !isOptional(v['logMaxTotalMb'], (x) => typeof x === 'number') ||
+    !isOptional(v['stdoutLogDir'], isString) ||
     !isOptional(v['scanRoots'], isStringArray) ||
     !isOptional(v['closeToTray'], (x) => typeof x === 'boolean') ||
     !isOptional(v['webEnabled'], (x) => typeof x === 'boolean') ||
@@ -144,8 +172,29 @@ function validateSettingsShape(v: unknown): Partial<Settings> | null {
   for (const [key, value] of Object.entries(v)) {
     if (value !== undefined) partial[key] = value
   }
+  // 日志保留参数做区间钳制（而不是判损坏）：外部手改 settings.json 写进 0/负数时，
+  // 若原样放行会让「保留 0 个 run」退化成清空全部 stdout 历史。
+  for (const [key, min, max] of LOG_LIMIT_RANGES) {
+    const raw = partial[key]
+    if (typeof raw !== 'number') continue
+    if (Number.isFinite(raw) && Number.isInteger(raw) && raw >= min && raw <= max) continue
+    const fallback = DEFAULT_SETTINGS[key]
+    console.warn(
+      `[config-store] settings.${key}=${raw} 超出允许区间 [${min}, ${max}]，已回落为 ${String(fallback)}`
+    )
+    partial[key] = fallback
+  }
   return partial as Partial<Settings>
 }
+
+/** 日志保留参数的合法区间（与 IPC schema 一致）；越界值回落默认值而非判损坏。 */
+const LOG_LIMIT_RANGES: Array<[keyof Settings, number, number]> = [
+  ['logMaxFileMb', 1, 1024],
+  ['logMaxRotations', 1, 10],
+  ['logRunsToKeep', 1, 100],
+  ['logRetentionDays', 1, 365],
+  ['logMaxTotalMb', 1, 1048576]
+]
 
 // ---------- 原子 JSON 文件（内存缓存 + 变更即写 + 损坏备份重建） ----------
 
@@ -241,7 +290,49 @@ class AtomicJsonFile<T> {
 /** jdk:add 请求体（channel 表为 Jdk，id 允许缺省由 store 生成） */
 export type JdkInput = Omit<Jdk, 'id'> & { id?: string }
 
+/** maven:add / maven:update 请求体（id 缺省由 store 生成；null = 清除可选字段） */
+export type MavenInput = Omit<Maven, 'id' | 'settingsPath' | 'localRepoPath'> & {
+  id?: string
+  settingsPath?: string | null
+  localRepoPath?: string | null
+}
+
 // ---------- ConfigStore 门面 ----------
+
+/** ProjectInput → 落库形态（create/update 共用；可选字段 undefined 即不落键，null 清除语义在上游转 undefined） */
+function projectFromInput(id: string, input: ProjectInput): Project {
+  return {
+    id,
+    name: input.name,
+    jarPath: input.jarPath,
+    jdkId: input.jdkId,
+    jvmArgs: [...input.jvmArgs],
+    programArgs: [...input.programArgs],
+    envVars: { ...input.envVars },
+    ...(input.logFilePath !== undefined ? { logFilePath: input.logFilePath } : {}),
+    ...(input.encodingOverride !== undefined ? { encodingOverride: input.encodingOverride } : {}),
+    ...(input.mavenId !== undefined ? { mavenId: input.mavenId } : {}),
+    ...(input.buildCommand !== undefined ? { buildCommand: input.buildCommand } : {}),
+    ...(input.buildDir !== undefined ? { buildDir: input.buildDir } : {})
+  }
+}
+
+/** MavenInput → 落库形态（settingsPath/localRepoPath 的 null = 清除 → 不落键） */
+function mavenFromInput(input: MavenInput & { id: string }): Maven {
+  return {
+    id: input.id,
+    name: input.name,
+    homePath: input.homePath,
+    version: input.version,
+    ...(input.settingsPath !== undefined && input.settingsPath !== null
+      ? { settingsPath: input.settingsPath }
+      : {}),
+    ...(input.localRepoPath !== undefined && input.localRepoPath !== null
+      ? { localRepoPath: input.localRepoPath }
+      : {}),
+    source: input.source
+  }
+}
 
 /**
  * 三个 JSON store 的门面 + CRUD + 事件。
@@ -250,6 +341,7 @@ export type JdkInput = Omit<Jdk, 'id'> & { id?: string }
 export class ConfigStore extends EventEmitter {
   private readonly projectsFile: AtomicJsonFile<Project[]>
   private readonly jdksFile: AtomicJsonFile<Jdk[]>
+  private readonly mavensFile: AtomicJsonFile<Maven[]>
   private readonly settingsFile: AtomicJsonFile<Settings>
 
   constructor(paths: AppPaths) {
@@ -260,6 +352,10 @@ export class ConfigStore extends EventEmitter {
     })
     this.jdksFile = new AtomicJsonFile<Jdk[]>(paths.jdksFile, {
       validate: validateJdks,
+      makeDefault: () => []
+    })
+    this.mavensFile = new AtomicJsonFile<Maven[]>(paths.mavensFile, {
+      validate: validateMavens,
       makeDefault: () => []
     })
     this.settingsFile = new AtomicJsonFile<Settings>(paths.settingsFile, {
@@ -276,6 +372,7 @@ export class ConfigStore extends EventEmitter {
     await Promise.all([
       this.projectsFile.load(),
       this.jdksFile.load(),
+      this.mavensFile.load(),
       this.settingsFile.load()
     ])
   }
@@ -287,19 +384,7 @@ export class ConfigStore extends EventEmitter {
   }
 
   async createProject(input: ProjectInput): Promise<Project> {
-    const project: Project = {
-      id: randomUUID(),
-      name: input.name,
-      jarPath: input.jarPath,
-      jdkId: input.jdkId,
-      jvmArgs: [...input.jvmArgs],
-      programArgs: [...input.programArgs],
-      envVars: { ...input.envVars },
-      ...(input.logFilePath !== undefined ? { logFilePath: input.logFilePath } : {}),
-      ...(input.encodingOverride !== undefined
-        ? { encodingOverride: input.encodingOverride }
-        : {})
-    }
+    const project = projectFromInput(randomUUID(), input)
     const next = [...this.projectsFile.get(), project]
     await this.projectsFile.set(next)
     this.emitChanged(CONFIG_EVENTS.PROJECTS_CHANGED, next)
@@ -313,19 +398,7 @@ export class ConfigStore extends EventEmitter {
     if (index === -1) {
       throw new ConfigError('NOT_FOUND', `项目不存在：${input.id}`)
     }
-    const updated: Project = {
-      id: input.id,
-      name: input.name,
-      jarPath: input.jarPath,
-      jdkId: input.jdkId,
-      jvmArgs: [...input.jvmArgs],
-      programArgs: [...input.programArgs],
-      envVars: { ...input.envVars },
-      ...(input.logFilePath !== undefined ? { logFilePath: input.logFilePath } : {}),
-      ...(input.encodingOverride !== undefined
-        ? { encodingOverride: input.encodingOverride }
-        : {})
-    }
+    const updated = projectFromInput(input.id, input)
     list[index] = updated
     await this.projectsFile.set(list)
     this.emitChanged(CONFIG_EVENTS.PROJECTS_CHANGED, list)
@@ -410,6 +483,63 @@ export class ConfigStore extends EventEmitter {
     const next = jdks.filter((j) => j.id !== id)
     await this.jdksFile.set(next)
     this.emitChanged(CONFIG_EVENTS.JDKS_CHANGED, next)
+    return structuredClone(target)
+  }
+
+  // ---------- mavens ----------
+
+  listMavens(): Maven[] {
+    return this.mavensFile.get()
+  }
+
+  /** id 缺省时生成；version/source 由调用方（ipc-registry 校验派生 / 扫描合并）给定 */
+  async addMaven(input: MavenInput): Promise<Maven> {
+    const maven = mavenFromInput({ ...input, id: input.id ?? randomUUID() })
+    const next = [...this.mavensFile.get(), maven]
+    await this.mavensFile.set(next)
+    this.emitChanged(CONFIG_EVENTS.MAVENS_CHANGED, next)
+    return structuredClone(maven)
+  }
+
+  async updateMaven(maven: Maven): Promise<Maven> {
+    const list = this.mavensFile.get()
+    const index = list.findIndex((m) => m.id === maven.id)
+    if (index === -1) {
+      throw new ConfigError('NOT_FOUND', `Maven 不存在：${maven.id}`)
+    }
+    list[index] = { ...maven }
+    await this.mavensFile.set(list)
+    this.emitChanged(CONFIG_EVENTS.MAVENS_CHANGED, list)
+    return structuredClone(list[index])
+  }
+
+  /** 整体替换 mavens 列表（环境探测合并落库：maven-scanner.mergeMavens 产物一次性写回） */
+  async replaceMavens(mavens: Maven[]): Promise<Maven[]> {
+    const next = structuredClone(mavens)
+    await this.mavensFile.set(next)
+    this.emitChanged(CONFIG_EVENTS.MAVENS_CHANGED, next)
+    return structuredClone(next)
+  }
+
+  /** 被项目 mavenId 引用时拒绝（错误信息含引用项目名，UI/Agent 可据此引导改绑） */
+  async removeMaven(id: string): Promise<Maven> {
+    const mavens = this.mavensFile.get()
+    const index = mavens.findIndex((m) => m.id === id)
+    if (index === -1) {
+      throw new ConfigError('NOT_FOUND', `Maven 不存在：${id}`)
+    }
+    const target = mavens[index]
+    const referrers = this.projectsFile.get().filter((p) => p.mavenId === id)
+    if (referrers.length > 0) {
+      const names = referrers.map((p) => p.name).join('、')
+      throw new ConfigError(
+        'CONFLICT',
+        `Maven「${target.name}」正被 ${referrers.length} 个项目引用：${names}；请先在这些项目的构建配置中改绑或清除 Maven`
+      )
+    }
+    const next = mavens.filter((m) => m.id !== id)
+    await this.mavensFile.set(next)
+    this.emitChanged(CONFIG_EVENTS.MAVENS_CHANGED, next)
     return structuredClone(target)
   }
 

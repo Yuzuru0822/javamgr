@@ -18,9 +18,10 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { RunRecord } from '../../shared/types'
+import { renameWithRetry } from '../fs-utils'
 import type { ProcessSnapshot, TaskOps } from './task-killer'
 import { matchesJavaName } from './task-killer'
 
@@ -129,7 +130,7 @@ export class PidRegistry {
       await mkdir(path.dirname(this.opts.runsFile), { recursive: true })
       const tmp = `${this.opts.runsFile}.${randomUUID().slice(0, 8)}.tmp`
       await writeFile(tmp, `${JSON.stringify([...this.records.values()], null, 2)}\n`, 'utf8')
-      await this.renameWithRetry(tmp, this.opts.runsFile)
+      await renameWithRetry(tmp, this.opts.runsFile, 3, this.sleep)
     }
     const next = this.writeTail.then(perform, perform)
     this.writeTail = next.then(
@@ -137,22 +138,6 @@ export class PidRegistry {
       () => undefined
     )
     return next
-  }
-
-  /** Windows 下 rename 可能被杀软/索引器瞬态锁住（EPERM/EACCES/EBUSY）：小退避重试 */
-  private async renameWithRetry(from: string, to: string, attempts = 3): Promise<void> {
-    for (let i = 0; i < attempts; i++) {
-      try {
-        await rename(from, to)
-        return
-      } catch (err) {
-        const code = (err as NodeJS.ErrnoException).code
-        if (i === attempts - 1 || (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY')) {
-          throw err
-        }
-        await this.sleep(50)
-      }
-    }
   }
 
   /** start 成功后登记（变更即写盘） */

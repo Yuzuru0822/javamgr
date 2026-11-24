@@ -12,6 +12,7 @@ import ProjectTable from '@renderer/components/ProjectTable.vue'
 import ProjectForm from '@renderer/components/ProjectForm.vue'
 import JarImportDialog from '@renderer/components/JarImportDialog.vue'
 import LogViewer from '@renderer/components/LogViewer.vue'
+import BuildDialog from '@renderer/components/BuildDialog.vue'
 
 /**
  * 项目面板（计划 §2.4 / §3 S3.6 + S4.7）：卡片/列表双视图 + 批量工具条（全部启动/停止）。
@@ -146,6 +147,26 @@ const logProjectId = ref('')
 function openLogs(project: ProjectWithRuntime): void {
   logProjectId.value = project.id
   logDrawerVisible.value = true
+}
+
+// ---------- 构建（v0.7.0：BuildDialog 承载输出流；已在构建中则直接查看） ----------
+const buildDialogVisible = ref(false)
+const buildProject = ref<ProjectWithRuntime | null>(null)
+
+async function handleBuild(project: ProjectWithRuntime): Promise<void> {
+  buildProject.value = project
+  try {
+    await ipc.build.run(project.id)
+    buildDialogVisible.value = true
+  } catch (err) {
+    // 已在构建中：拉起对话框查看进行中的输出，其余错误如实提示
+    const running = await ipc.build.getState(project.id).catch(() => null)
+    if (running?.status === 'running') {
+      buildDialogVisible.value = true
+    } else {
+      ElMessage.error(errText(err))
+    }
+  }
 }
 
 // ---------- 单项操作 ----------
@@ -450,6 +471,7 @@ onBeforeUnmount(() => {
         @logs="openLogs"
         @edit="openEdit"
         @remove="handleRemove"
+        @build="handleBuild"
       />
     </div>
     <template v-else-if="store.projects.length > 0 && viewMode === 'list'">
@@ -468,6 +490,7 @@ onBeforeUnmount(() => {
         @logs="openLogs"
         @edit="openEdit"
         @remove="handleRemove"
+        @build="handleBuild"
       />
       <div class="pagination">
         <el-pagination
@@ -496,6 +519,12 @@ onBeforeUnmount(() => {
     >
       <LogViewer v-if="logDrawerVisible && logProjectId !== ''" :project-id="logProjectId" />
     </el-drawer>
+
+    <BuildDialog
+      v-model:visible="buildDialogVisible"
+      :project-id="buildProject?.id ?? null"
+      :project-name="buildProject?.name ?? ''"
+    />
   </div>
 </template>
 

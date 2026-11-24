@@ -36,7 +36,7 @@ describe('注入式 userData（纯 Node 环境零 electron 依赖）', () => {
     expect(() => getPaths()).toThrow(/configureUserData/)
   })
 
-  it('configureUserData 注入目录后 getPaths/ensureDirs 可用且幂等', async () => {
+  it('configureUserData 注入目录后 ensureDirs 仅幂等预建 config，不提前创建默认 logs', async () => {
     tempDir = await mkdtemp(path.join(tmpdir(), 'jpm-paths-'))
     configureUserData(tempDir)
 
@@ -47,9 +47,8 @@ describe('注入式 userData（纯 Node 环境零 electron 依赖）', () => {
     await ensureDirs() // 幂等
 
     const configDir = await stat(p.configDir)
-    const logsDir = await stat(p.logsDir)
     expect(configDir.isDirectory()).toBe(true)
-    expect(logsDir.isDirectory()).toBe(true)
+    await expect(stat(p.logsDir)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('支持惰性求值注入（app.getPath 场景）', async () => {
