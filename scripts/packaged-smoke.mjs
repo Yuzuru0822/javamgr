@@ -2,6 +2,8 @@
  * 打包产物冒烟脚本（计划 §3 S6.3 / §6 打包验证）。
  *
  * 用法：node scripts/packaged-smoke.mjs [win-unpacked 目录]（默认 dist/win-unpacked）
+ * 隔离已有安装版：JAVAMGR_SMOKE_USER_DATA=<独立 userData> JAVAMGR_SMOKE_PORT=<空闲端口>，
+ * 主实例与 stdio 桥接都会携带 --user-data-dir，不读取/改写真实配置，也不撞单实例锁。
  * 步骤：
  *  ① 运行 javamgr.exe → 进程出现
  *  ② %APPDATA%/javamgr/mcp.port 文件出现
@@ -24,12 +26,21 @@ import os from 'node:os'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const appDir = process.argv[2] ? path.resolve(process.argv[2]) : path.resolve(__dirname, '../dist/win-unpacked')
 const exe = path.join(appDir, 'javamgr.exe')
-const userDataDir = path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'javamgr')
+const isolatedUserData = process.env.JAVAMGR_SMOKE_USER_DATA
+const userDataDir = isolatedUserData
+  ? path.resolve(isolatedUserData)
+  : path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'javamgr')
+const userDataArgs = isolatedUserData ? [`--user-data-dir=${userDataDir}`] : []
+// 主进程由 --user-data-dir 隔离；stdio 桥接是纯 Node 入口，仍按 APPDATA/javamgr 找 mcp.port。
+const smokeEnv = { ...process.env, APPDATA: path.dirname(userDataDir) }
 const portFile = path.join(userDataDir, 'mcp.port')
 const settingsFile = path.join(userDataDir, 'config', 'settings.json')
 /** 冒烟用契约端口（7777 常被本机 VPN 客户端占用——用它验证 bind-failed 显式失败路径，
  *  再以空闲端口 17877 验证功能链路） */
-const SMOKE_PORT = 17_877
+const SMOKE_PORT = Number(process.env.JAVAMGR_SMOKE_PORT ?? 17_877)
+if (!Number.isInteger(SMOKE_PORT) || SMOKE_PORT < 1 || SMOKE_PORT > 65_535) {
+  throw new Error(`JAVAMGR_SMOKE_PORT 非法：${process.env.JAVAMGR_SMOKE_PORT}`)
+}
 const MCP_URL = `http://127.0.0.1:${SMOKE_PORT}/mcp`
 
 const run = (file, args, opts = {}) =>
@@ -106,7 +117,7 @@ async function seedSettings(port) {
 }
 
 function launchMain() {
-  mainProc = spawn(exe, [], { cwd: appDir, detached: true, stdio: 'ignore', windowsHide: false })
+  mainProc = spawn(exe, userDataArgs, { cwd: appDir, detached: true, stdio: 'ignore', windowsHide: false, env: smokeEnv })
   const pid = mainProc.pid
   mainProc.unref()
   return pid
@@ -138,7 +149,7 @@ try {
     record('⓪ 7777 空闲（本机无占用场景，跳过 bind-failed 验证）', true, '')
   }
 
-  // ---------- 功能链路：契约端口 17877 ----------
+  // ---------- 功能链路：契约端口（默认 17877，可用 JAVAMGR_SMOKE_PORT 避开本机实例） ----------
   await seedSettings(SMOKE_PORT)
   const mainPid = launchMain()
 
@@ -205,7 +216,7 @@ try {
   // ---------- ⑤ stdio 桥接（主实例保持运行） ----------
   let bridgeOk = true
   try {
-    const bridge = spawn(exe, ['--mcp-stdio'], { cwd: appDir, stdio: ['pipe', 'pipe', 'pipe'] })
+    const bridge = spawn(exe, [...userDataArgs, '--mcp-stdio'], { cwd: appDir, stdio: ['pipe', 'pipe', 'pipe'], env: smokeEnv })
     let bridgeOut = ''
     let bridgeErr = ''
     bridge.stdout.on('data', (c) => (bridgeOut += c.toString('utf8')))
@@ -248,10 +259,10 @@ try {
     )
     const toolsList = await waitBridge(101, '桥接 tools/list 响应')
     const toolNames = (toolsList?.result?.tools ?? []).map((t) => t.name).sort()
-    // 与 src/main/mcp/tools.ts 注册集一致（15 工具；桥接为消息级透传，清单即主实例清单）
+    // 与 src/main/mcp/tools.ts 注册集一致（16 工具；桥接为消息级透传，清单即主实例清单）
     const expectedTools = [
       'batch_create_projects', 'create_project', 'delete_project', 'get_status', 'list_jdks',
-      'list_projects', 'read_logs', 'restart_project', 'scan_jars', 'search_logs',
+      'list_mavens', 'list_projects', 'read_logs', 'restart_project', 'scan_jars', 'search_logs',
       'start_all_projects', 'start_project', 'stop_all_projects', 'stop_project', 'update_project'
     ]
     const bridgeToolsOk =

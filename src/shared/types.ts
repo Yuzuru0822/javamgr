@@ -42,6 +42,12 @@ export interface Project {
   logFilePath?: string
   /** 可选：stdout 编码覆盖 */
   encodingOverride?: EncodingOverride
+  /** 可选：绑定的 Maven.id（构建配置；未绑定 = 项目无构建信息） */
+  mavenId?: string
+  /** 可选：maven 构建 goals/命令（如 "clean package -DskipTests"），依赖 mavenId 生效 */
+  buildCommand?: string
+  /** 可选：构建工作目录（含 pom.xml）；缺省自动推断：jar 在 target\ 下取其上级，否则 jar 所在目录 */
+  buildDir?: string
 }
 
 /** projects:create / projects:update 请求体（update 必带 id） */
@@ -89,6 +95,75 @@ export interface JdkValidation {
   error?: string
 }
 
+// ---------- Maven ----------
+
+/** 已注册的 Maven 发行版（mavens.json 持久化条目） */
+export interface Maven {
+  id: string
+  /** 展示名，如 "Apache Maven 3.9.9" */
+  name: string
+  /** Maven home 绝对路径（含 bin\mvn.cmd） */
+  homePath: string
+  /** 版本（lib\maven-core-*.jar 文件名解析；解析不出为 "unknown"） */
+  version: string
+  /** 可选：自定义 settings.xml 路径（缺省 = maven home conf\settings.xml 或 ~/.m2/settings.xml 由 maven 自行解析） */
+  settingsPath?: string
+  /** 可选：本地仓库路径（缺省从 settings.xml localRepository 解析或 ~/.m2/repository） */
+  localRepoPath?: string
+  /** 来源：环境探测（M2_HOME/MAVEN_HOME/PATH）/ 手动添加 */
+  source: 'scan' | 'manual'
+}
+
+/** maven:validate / maven-scanner.validateMavenPath 返回：即时校验结果（派生版本 + settings.xml 解析出的仓库路径建议） */
+export interface MavenValidation {
+  ok: boolean
+  /** 校验通过时的完整 Maven 草稿（source: 'manual'，id 已生成，可直接入库） */
+  maven?: Maven
+  /** 校验失败原因（中文，UI 直接展示） */
+  error?: string
+  /** 校验通过时的附加派生信息（不入库，UI 提示用）：settings.xml 里声明的 localRepository */
+  settingsLocalRepo?: string
+  /** 校验通过时的附加派生信息：默认 settings.xml 候选路径（maven home conf\settings.xml，存在时） */
+  defaultSettingsPath?: string
+}
+
+// ---------- Maven 构建（build:run 等 / v0.7.0 构建按钮） ----------
+
+/** 单项目构建终态：running 进行中；success/failure 按退出码；cancelled 用户取消 */
+export type BuildStatus = 'running' | 'success' | 'failure' | 'cancelled'
+
+/** build:getState 返回 / build:run 启动确认：构建全量快照（含内存保留的输出行） */
+export interface BuildState {
+  projectId: string
+  status: BuildStatus
+  /** 完整命令行（含 mvn 脚本路径，展示用） */
+  commandLine: string
+  /** 实际构建工作目录（buildDir 显式值或自动推断结果） */
+  workDir: string
+  /** 本次构建开始时间（epoch ms） */
+  startedAt: number
+  /** 结束耗时（ms；running 时省略） */
+  durationMs?: number
+  /** mvn 退出码（cancelled 时省略） */
+  exitCode?: number
+  /** 输出行（滚动缓冲，超上限丢头部保尾部；含解码与 \r 处理后的纯文本行） */
+  lines: string[]
+}
+
+/** build:output 事件载荷（批量行，防 IPC 洪泛） */
+export interface BuildOutputEvent {
+  projectId: string
+  lines: string[]
+}
+
+/** build:statusChanged 事件载荷（终态；started 由 build:run 返回值携带） */
+export interface BuildStatusEvent {
+  projectId: string
+  status: BuildStatus
+  exitCode?: number
+  durationMs?: number
+}
+
 // ---------- 设置 ----------
 
 /** settings.json（§2.4 设置页全量字段；默认值由 S1 config-store 拥有） */
@@ -109,8 +184,14 @@ export interface Settings {
   logMaxFileMb: number
   /** 日志保留：每 run 轮转文件保留个数（默认 3） */
   logMaxRotations: number
-  /** 日志保留：每项目保留最近 N 个 run（默认 10） */
+  /** 日志保留：每项目保留最近 N 个历史 run（默认 10；活动 run 不计入保留数） */
   logRunsToKeep: number
+  /** stdout 日志按修改时间保留天数（默认 7；活动文件不删） */
+  logRetentionDays: number
+  /** stdout 日志全局目标上限 MiB（默认 512；活动文件计入占用但不强删） */
+  logMaxTotalMb: number
+  /** 用户选择的 stdout 日志父目录；实际目录为 <stdoutLogDir>/javamgr-logs，空 = 默认 userData/logs */
+  stdoutLogDir: string
   /** 用户追加的 JDK 扫描根目录（叠加默认根 + JAVA_HOME） */
   scanRoots: string[]
   /** 关闭窗口 = 最小化到托盘 */
@@ -138,6 +219,30 @@ export interface LogChunk {
   projectId: string
   source: LogSource
   lines: string[]
+}
+
+/** stdout 清理范围：当前目录按保留策略；旧默认根仅由用户显式触发全量清理 */
+export type LogCleanupScope = 'current' | 'legacyDefault'
+
+export interface LogCleanupResult {
+  scope: LogCleanupScope
+  logsDir: string
+  freedBytes: number
+  deletedFiles: number
+  remainingBytes: number
+  activeBytes: number
+  errors: string[]
+  cleanedAt: string
+}
+
+export interface LogStorageInfo {
+  logsDir: string
+  defaultLogsDir: string
+  totalBytes: number
+  activeBytes: number
+  lastCleanupAt?: string
+  errors: string[]
+  storageError?: string
 }
 
 // ---------- 检索（logs:search / MCP search_logs 同一契约） ----------

@@ -22,9 +22,13 @@
  */
 
 import type { Readable } from 'node:stream'
+import path from 'node:path'
 import type {
   LogAppendedEvent,
+  LogCleanupResult,
+  LogCleanupScope,
   LogSource,
+  LogStorageInfo,
   Project,
   ReadHistoryParams,
   ReadHistoryResult,
@@ -55,8 +59,14 @@ export type LogBroadcaster = (chunk: LogAppendedEvent) => void
 
 export interface LogManagerOptions {
   store: ConfigStore
-  /** <userData>/logs（AppPaths.logsDir） */
+  /** 当前 stdout 持久化根目录 */
   logsDir: string
+  /** 默认 <userData>/logs，用于占用展示及显式清理旧目录 */
+  legacyLogsDir?: string
+  /** 启动时目录校验失败：保留实时日志但禁用 stdout 持久化，绝不回写默认 C 盘 */
+  storageError?: string
+  /** 周期清理间隔，默认 1 小时；测试可注入小值 */
+  cleanupIntervalMs?: number
   /** 批量推送通道（缺省不推送，仅落盘——测试/无窗口场景） */
   broadcaster?: LogBroadcaster
   /** log → process 唯一信号通道：首条日志到达（S-1：只发信号，不改状态） */
@@ -87,31 +97,67 @@ interface ProjectLogState {
 /** 批量推送阈值（R7：200ms 或 100 行） */
 const BATCH_FLUSH_LINES = 100
 const BATCH_FLUSH_MS = 200
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000
+const ERROR_THROTTLE_MS = 10_000
+
+function boundedSetting(value: number, min: number, max: number, fallback: number): number {
+  return Number.isFinite(value) && Number.isInteger(value) && value >= min && value <= max
+    ? value
+    : fallback
+}
 
 export class LogManager {
   private readonly store: ConfigStore
   private readonly broadcaster?: LogBroadcaster
   private readonly markRunning?: (projectId: string) => void
   private readonly tailPollIntervalMs: number
+  private readonly cleanupIntervalMs: number
   private readonly logStore: LogStore
+  private readonly logStoreDirectory: string
+  private readonly legacyLogStore?: LogStore
+  private readonly defaultLogsDir: string
+  private readonly storageError?: string
   private readonly states = new Map<string, ProjectLogState>()
+  private readonly writerCloses = new Set<Promise<void>>()
+  private readonly cleanupTasks = new Set<Promise<LogCleanupResult>>()
+  private readonly lastErrorAt = new Map<string, number>()
+  private cleanupTimer: NodeJS.Timeout | undefined
+  private maintenanceStarted = false
+  private stopping = false
+  private lastCleanupAt: string | undefined
+  private lastCleanupErrors: string[] = []
 
   constructor(opts: LogManagerOptions) {
     this.store = opts.store
     this.broadcaster = opts.broadcaster
     this.markRunning = opts.markRunning
     this.tailPollIntervalMs = opts.tailPollIntervalMs ?? 2_000
-    this.logStore = new LogStore({
-      logsDir: opts.logsDir,
+    this.cleanupIntervalMs = opts.cleanupIntervalMs ?? CLEANUP_INTERVAL_MS
+    this.defaultLogsDir = opts.legacyLogsDir ?? opts.logsDir
+    this.logStoreDirectory = opts.logsDir
+    this.storageError = opts.storageError
+    const logStoreOptions = {
       getLimits: () => {
         const s = this.store.getSettings()
         return {
-          maxFileBytes: Math.max(1, s.logMaxFileMb) * 1024 * 1024,
-          maxRotations: s.logMaxRotations,
-          runsToKeep: s.logRunsToKeep
+          maxFileBytes: boundedSetting(s.logMaxFileMb, 1, 1024, 10) * 1024 * 1024,
+          maxRotations: boundedSetting(s.logMaxRotations, 1, 10, 3),
+          // 非有限数/非整数同样回落，防止 Infinity 令轮转循环或保留治理失效
+          runsToKeep: boundedSetting(s.logRunsToKeep, 1, 100, 10),
+          retentionMs: boundedSetting(s.logRetentionDays, 1, 365, 7) * 24 * 60 * 60 * 1000,
+          maxTotalBytes: boundedSetting(s.logMaxTotalMb, 1, 1048576, 512) * 1024 * 1024
         }
       }
-    })
+    }
+    this.logStore = new LogStore({ logsDir: opts.logsDir, ...logStoreOptions })
+    if (opts.legacyLogsDir && path.resolve(opts.legacyLogsDir) !== path.resolve(opts.logsDir)) {
+      // 旧默认目录专用实例：允许显式 legacyDefault 全删
+      this.legacyLogStore = new LogStore({
+        logsDir: opts.legacyLogsDir,
+        allowPurge: true,
+        ...logStoreOptions
+      })
+    }
   }
 
   // ==================== run 生命周期（S-1 正向通道） ====================
@@ -120,7 +166,7 @@ export class LogManager {
   handleRunStarted(event: RunStartHandoff): void {
     const project = this.findProject(event.projectId)
     if (!project) return // 项目已删：只排空管道防子进程写阻塞
-    this.teardown(event.projectId)
+    this.trackTeardown(this.teardown(event.projectId))
 
     const route: LogSource = project.logFilePath ? 'file' : 'stdout'
     const state: ProjectLogState = {
@@ -146,7 +192,14 @@ export class LogManager {
     state.capture.start()
 
     if (route === 'stdout') {
-      state.writer = this.logStore.openRun(event.projectId, event.runId)
+      if (!this.storageError) {
+        try {
+          state.writer = this.logStore.openRun(event.projectId, event.runId)
+        } catch (err) {
+          // 落盘不可用时降级为「仅实时推送」，不得让日志侧异常中断进程启动
+          this.reportError(`open-run:${event.projectId}`, '打开 stdout 日志写入器失败', err)
+        }
+      }
     } else {
       this.startTailer(event.projectId, project, state)
     }
@@ -155,7 +208,7 @@ export class LogManager {
   /** proc:statusChanged 接入点（装配层转接）：终态 → flush 残行 + 关闭路由组件 */
   handleStatusChanged(payload: StatusChangedEvent): void {
     if (payload.status === 'STOPPED' || payload.status === 'ABNORMAL_EXIT') {
-      this.teardown(payload.projectId)
+      this.trackTeardown(this.teardown(payload.projectId))
     }
   }
 
@@ -166,7 +219,7 @@ export class LogManager {
   switchRoute(projectId: string): void {
     const project = this.findProject(projectId)
     if (!project) {
-      this.teardown(projectId)
+      this.trackTeardown(this.teardown(projectId))
       return
     }
     const state = this.states.get(projectId)
@@ -181,23 +234,43 @@ export class LogManager {
       return
     }
     if (newRoute === 'file') {
-      // stdout → file：停转发与落盘，起 tailer
+      // stdout → file：先把旧来源 batch 交给原 writer，再关闭；不得先 close 导致残批只广播不落盘。
       state.forwarding = false
-      state.writer?.close()
+      this.flushBatch(projectId)
+      const writer = state.writer
       state.writer = undefined
-      this.flushBatch(projectId)
+      if (writer) this.trackWriterClose(writer)
+      state.route = newRoute
       this.startTailer(projectId, project, state)
-    } else {
-      // file → stdout：停 tailer，接管转发（本 run 切换点之前的 stdout 已被排空丢弃，
-      // 落盘自切换点起——即时切换的固有边界，UI 引导长跑服务配置日志文件）
-      void state.tailer?.stop()
-      state.tailer = undefined
-      state.tailDecoder = undefined
-      this.flushBatch(projectId)
-      state.forwarding = true
-      state.writer = this.logStore.openRun(projectId, state.runId ?? `switch-${Date.now()}`)
+      return
     }
+
+    // file → stdout：停 tailer，接管转发（切换点之前的 stdout 已排空丢弃）。
+    void state.tailer?.stop()
+    state.tailer = undefined
+    state.tailDecoder = undefined
+    this.flushBatch(projectId)
     state.route = newRoute
+    state.forwarding = true
+    if (!this.storageError) {
+      const runId = state.runId ?? `switch-${Date.now()}`
+      try {
+        state.writer = this.logStore.openRun(projectId, runId)
+      } catch (err) {
+        // 极快的 stdout→file→stdout 往返可能撞上同名 writer 关闭尾段；换独立 run 防复用。
+        if (!this.logStore.hasRun(projectId, runId)) {
+          this.reportError(`open-run:${projectId}`, '打开 stdout 日志写入器失败', err)
+          return
+        }
+        state.runId = `switch-${Date.now()}`
+        try {
+          state.writer = this.logStore.openRun(projectId, state.runId)
+        } catch (switchErr) {
+          this.reportError(`open-run:${projectId}`, '打开 stdout 日志写入器失败', switchErr)
+        }
+      }
+    }
+    return
   }
 
   /**
@@ -216,20 +289,118 @@ export class LogManager {
     this.startTailer(projectId, project, state)
   }
 
-  /**
-   * 进程退出兜底/应用关闭：flush 全部项目（残行广播 + 落盘）并关闭组件。
-   * P2-4（phase4 审查）：teardown 里 flushBatch 的 writer.append 是 fire-and-forget
-   * 异步链（内部 appendFile），不等落盘就返回会让 Electron quit 抢先——退出前最后
-   * ≤100 行/200ms 窗口的日志可能丢盘。先留各 writer 引用（teardown 会 close 并移除
-   * state），teardown 完成后 await 全部 writer.drain() 真实落盘再返回。
-   */
-  async shutdown(): Promise<void> {
-    const writers: RunLogWriter[] = []
-    for (const state of this.states.values()) {
-      if (state.writer) writers.push(state.writer)
+  /** 配置与进程重识别完成后调用：立即清理一次，之后每小时 single-flight 清理。 */
+  startMaintenance(): void {
+    if (this.maintenanceStarted || this.stopping) return
+    this.maintenanceStarted = true
+    void this.cleanupNow('current')
+    this.cleanupTimer = setInterval(() => {
+      void this.cleanupNow('current')
+    }, this.cleanupIntervalMs)
+    this.cleanupTimer.unref()
+  }
+
+  /** 保留设置保存后调用；设置已持久化，清理部分失败只进入结果，不回滚设置。 */
+  applyRetentionSettings(): Promise<LogCleanupResult> {
+    return this.cleanupNow('current')
+  }
+
+  /** current=按保留策略；legacyDefault=显式清空旧默认根内可确认属于 javamgr 的日志。 */
+  cleanupNow(scope: LogCleanupScope = 'current'): Promise<LogCleanupResult> {
+    const task = this.performCleanup(scope)
+    this.cleanupTasks.add(task)
+    void task.then(
+      () => this.cleanupTasks.delete(task),
+      () => this.cleanupTasks.delete(task)
+    )
+    return task
+  }
+
+  private async performCleanup(scope: LogCleanupScope): Promise<LogCleanupResult> {
+    const target = scope === 'legacyDefault' ? this.legacyLogStore : this.logStore
+    const logsDir = scope === 'legacyDefault' ? this.defaultLogsDir : this.logStoreDirectory
+    if (!target) {
+      return {
+        scope,
+        logsDir,
+        freedBytes: 0,
+        deletedFiles: 0,
+        remainingBytes: 0,
+        activeBytes: 0,
+        errors: ['旧默认目录与当前目录相同，拒绝将当前日志按旧目录全量清理'],
+        cleanedAt: new Date().toISOString()
+      }
     }
-    for (const projectId of [...this.states.keys()]) this.teardown(projectId)
-    await Promise.all(writers.map((w) => w.drain()))
+    try {
+      const result = await target.cleanup(scope)
+      if (scope === 'current') {
+        this.lastCleanupAt = result.cleanedAt
+        this.lastCleanupErrors = [...result.errors]
+      }
+      return result
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (scope === 'current') {
+        this.lastCleanupAt = new Date().toISOString()
+        this.lastCleanupErrors = [message]
+      }
+      let remainingBytes = 0
+      let activeBytes = 0
+      try {
+        const stats = await target.getStorageStats()
+        remainingBytes = stats.totalBytes
+        activeBytes = stats.activeBytes
+      } catch {
+        // 根目录本身不可读时保留 0，并由 errors 明确报告本次清理失败。
+      }
+      return {
+        scope,
+        logsDir,
+        freedBytes: 0,
+        deletedFiles: 0,
+        remainingBytes,
+        activeBytes,
+        errors: [message],
+        cleanedAt: new Date().toISOString()
+      }
+    }
+  }
+
+  async getStorageInfo(): Promise<LogStorageInfo> {
+    let totalBytes = 0
+    let activeBytes = 0
+    const errors = [...this.lastCleanupErrors]
+    try {
+      const stats = await this.logStore.getStorageStats()
+      totalBytes = stats.totalBytes
+      activeBytes = stats.activeBytes
+      errors.push(...stats.errors)
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err))
+    }
+    return {
+      logsDir: this.logStoreDirectory,
+      defaultLogsDir: this.defaultLogsDir,
+      totalBytes,
+      activeBytes,
+      ...(this.lastCleanupAt ? { lastCleanupAt: this.lastCleanupAt } : {}),
+      errors: [...new Set(errors)],
+      ...(this.storageError ? { storageError: this.storageError } : {})
+    }
+  }
+
+  /** 停止周期触发，等待所有生产者、writer 和清理任务完成后再允许 Electron 退出。 */
+  async shutdown(): Promise<void> {
+    this.stopping = true
+    if (this.cleanupTimer) clearInterval(this.cleanupTimer)
+    this.cleanupTimer = undefined
+    const teardowns = [...this.states.keys()].map((projectId) => this.teardown(projectId))
+    const results = await Promise.allSettled(teardowns)
+    for (const result of results) {
+      if (result.status === 'rejected') console.error('[log-manager] 关闭日志路由失败：', result.reason)
+    }
+    await Promise.allSettled([...this.writerCloses])
+    await Promise.allSettled([...this.cleanupTasks])
   }
 
   // ==================== 读取（IPC logs:readHistory 与 MCP read_logs 同源） ====================
@@ -329,21 +500,57 @@ export class LogManager {
     const chunk: LogAppendedEvent = { projectId, source, lines }
     if (state.writer) {
       state.writer.append(lines).catch((err: unknown) => {
-        console.error(`[log-manager] 日志落盘失败（${projectId}）：`, err)
+        this.reportError(`append:${projectId}`, `日志落盘失败（${projectId}）`, err)
       })
     }
     this.broadcaster?.(chunk)
   }
 
-  private teardown(projectId: string): void {
+  private teardown(projectId: string): Promise<void> {
     const state = this.states.get(projectId)
-    if (!state) return
-    this.flushBatch(projectId) // 残行批量先广播/落盘
+    if (!state) return Promise.resolve()
+    // dispose 可能 flush 未换行残行，因此必须先停生产者，再 flush batch。
     state.capture?.dispose()
-    void state.tailer?.stop()
-    state.writer?.close()
+    const tailerStopped = state.tailer?.stop() ?? Promise.resolve()
+    this.flushBatch(projectId)
     if (state.batchTimer !== undefined) clearTimeout(state.batchTimer)
-    this.states.delete(projectId)
+    this.states.delete(projectId) // 停止请求后的晚到 tailer 行不再进入新 run/路由
+    const writer = state.writer
+    state.writer = undefined
+    const writerClosed = writer ? this.trackWriterClose(writer) : Promise.resolve()
+    return (async () => {
+      try {
+        await tailerStopped
+      } finally {
+        await writerClosed
+      }
+    })()
+  }
+
+  private trackWriterClose(writer: RunLogWriter): Promise<void> {
+    const task = writer.close()
+    this.writerCloses.add(task)
+    void task.then(
+      () => this.writerCloses.delete(task),
+      (err: unknown) => {
+        this.writerCloses.delete(task)
+        this.reportError('writer-close', '关闭日志 writer 失败', err)
+      }
+    )
+    return task
+  }
+
+  private trackTeardown(task: Promise<void>): void {
+    void task.catch((err: unknown) => this.reportError('teardown', '关闭日志路由失败', err))
+  }
+
+  /** 高频 stdout 下持续落盘失败只节流记录，实时广播不被磁盘故障阻断。 */
+  private reportError(key: string, message: string, err: unknown): void {
+    const now = Date.now()
+    const previous = this.lastErrorAt.get(key) ?? -Infinity
+    if (now - previous < ERROR_THROTTLE_MS) return
+    this.lastErrorAt.set(key, now)
+    console.error(`[log-manager] ${message}：`, err)
   }
 }
 

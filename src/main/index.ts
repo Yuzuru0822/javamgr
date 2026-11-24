@@ -7,7 +7,14 @@ import { broadcastEvent, registerIpcHandlers, setWebBroadcaster } from './ipc/ip
 import { DEFAULT_SCAN_ROOTS, mergeJdks, scanJdks } from './jdk/jdk-scanner'
 import { managedJarSet, scanJars } from './jar/jar-scanner'
 import { ProcessManager } from './process/process-manager'
+import { createTaskOps } from './process/task-killer'
+import { BuildRunner } from './maven/build-runner'
 import { LogManager } from './log/log-manager'
+import {
+  resolveStdoutLogDir,
+  STDOUT_LOG_DIR_NAME,
+  validateStdoutLogDir
+} from './log/log-path'
 import { McpHost } from './mcp/mcp-host'
 import { runBridge } from './mcp/run-bridge'
 import { prepareExit } from './lifecycle'
@@ -143,13 +150,34 @@ function startMainMode(): void {
   })
 
   app.whenReady().then(async () => {
-    // S1：路径注入（paths.ts 零 electron 依赖，vitest 注入临时目录即可测）
+    // S1：路径注入后只预建 config/；stdout 目录必须等设置加载后再解析与验证。
     configureUserData(app.getPath('userData'))
-    await ensureDirs()
+    const appPaths = getPaths()
+    await ensureDirs(appPaths)
 
-    const store = new ConfigStore(getPaths())
+    const store = new ConfigStore(appPaths)
     storeRef = store
     await store.init()
+
+    // stdout 路由在配置加载后确定。解析/验证失败仍保留目标路径并传 storageError，
+    // 由 LogManager 禁止持久化，绝不静默回退到默认 C 盘目录。
+    let logsDir: string
+    let storageError: string | undefined
+    try {
+      logsDir = resolveStdoutLogDir(store.getSettings().stdoutLogDir, appPaths.logsDir)
+    } catch (err) {
+      // 无法形成合法目标时统一使用应用自有的非默认保留路径，避免根目录配置拼接出真实清理目标；
+      // storageError 会禁止 writer，且这里不会调用 mkdir/validate。
+      logsDir = path.join(appPaths.userDataDir, 'invalid-stdout-log-parent', STDOUT_LOG_DIR_NAME)
+      storageError = `stdout 日志目录解析失败：${err instanceof Error ? err.message : String(err)}`
+    }
+    if (storageError === undefined) {
+      try {
+        await validateStdoutLogDir(logsDir)
+      } catch (err) {
+        storageError = `stdout 日志目录验证失败：${err instanceof Error ? err.message : String(err)}`
+      }
+    }
 
     // N-6：主进程事件循环延迟简易打点（设置页可查看；utilityProcess 演进条件度量）
     const eventLoopMonitor = new EventLoopMonitor()
@@ -165,7 +193,9 @@ function startMainMode(): void {
     // S4：日志系统（先建，process-manager 广播需同时喂给它做终态 flush）
     const logManager = new LogManager({
       store,
-      logsDir: getPaths().logsDir,
+      logsDir,
+      legacyLogsDir: appPaths.logsDir,
+      ...(storageError !== undefined ? { storageError } : {}),
       broadcaster: (chunk) => broadcastEvent(IPC_EVENTS.LOG_APPENDED, chunk),
       markRunning: (projectId) => processManager.markRunning(projectId) // S-1：只发信号，状态转移在 process-manager
     })
@@ -190,6 +220,14 @@ function startMainMode(): void {
     // S4：S-1 握手接线——process → log 唯一通道（run:started 管道句柄交付）
     processManager.setLogHooks({
       onRunStarted: (event) => logManager.handleRunStarted(event)
+    })
+
+    // v0.7.0：Maven 构建执行器（杀树与停止项目共用 task-killer；输出/终态经事件广播）
+    const buildRunner = new BuildRunner({
+      store,
+      killTree: (pid, timeoutMs) => createTaskOps().killTree(pid, timeoutMs),
+      broadcastOutput: (event) => broadcastEvent(IPC_EVENTS.BUILD_OUTPUT, event),
+      broadcastStatus: (event) => broadcastEvent(IPC_EVENTS.BUILD_STATUS_CHANGED, event)
     })
 
     // S5：MCP 宿主（单 server 双通道的 HTTP 侧；工具 handler 直调上面两个服务层，与 IPC 同源）
@@ -234,6 +272,7 @@ function startMainMode(): void {
       mcpStatus: mcpHost,
       eventLoop: eventLoopMonitor,
       updater: updaterHost,
+      buildRunner,
       webStatus: {
         // 惰性引用：WebHost 在注册完成后构造（需要 ipcHandle.call）
         getWebStatus: () => webHost?.getWebStatus() ?? { enabled: false }
@@ -263,6 +302,9 @@ function startMainMode(): void {
       }
     } catch (err) {
       console.error('[process-manager] 启动重识别失败（面板仍可用，状态可能缺失）：', err)
+    } finally {
+      // 无论重识别成功或失败都启动：先做一次保留清理，再由 LogManager 每小时维护。
+      logManager.startMaintenance()
     }
 
     // S3：系统托盘（显示/隐藏、全部启动/停止、退出走 exitPolicy）

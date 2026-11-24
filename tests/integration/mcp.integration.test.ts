@@ -211,8 +211,8 @@ async function rmWithRetry(target: string, attempts = 5): Promise<void> {
   }
 }
 
-describe('integration/mcp：HTTP 通道 15 工具端到端（真实服务层 + 夹具 jar）', () => {
-  it('initialize + tools/list：返回 15 工具，serverInfo.name=javamgr（A15）', async () => {
+describe('integration/mcp：HTTP 通道 16 工具端到端（真实服务层 + 夹具 jar）', () => {
+  it('initialize + tools/list：返回 16 工具，serverInfo.name=javamgr（A15）', async () => {
     expect(client.getServerVersion()?.name).toBe('javamgr')
     const result = await client.listTools()
     expect(result.tools.map((t) => t.name).sort()).toEqual(
@@ -225,6 +225,7 @@ describe('integration/mcp：HTTP 通道 15 工具端到端（真实服务层 + �
         'read_logs',
         'search_logs',
         'list_jdks',
+        'list_mavens',
         'create_project',
         'update_project',
         'delete_project',

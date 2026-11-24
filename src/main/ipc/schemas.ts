@@ -18,7 +18,10 @@ export const projectCreateSchema = z
     programArgs: z.array(z.string()),
     envVars: z.record(z.string(), z.string()),
     logFilePath: z.string().min(1).optional(),
-    encodingOverride: encodingOverrideSchema.optional()
+    encodingOverride: encodingOverrideSchema.optional(),
+    mavenId: z.string().min(1).optional(),
+    buildCommand: z.string().min(1).optional(),
+    buildDir: z.string().min(1).optional()
   })
   .strict()
 
@@ -79,6 +82,47 @@ export const jdkRemoveSchema = z
   })
   .strict()
 
+/**
+ * maven:add（版本/名称由主进程 validateMavenPath 派生；settingsPath/localRepoPath 可选，
+ * 空串视同缺省——渲染端负责 trim 后不传）
+ */
+export const mavenAddSchema = z
+  .object({
+    homePath: z.string().min(1, 'Maven 路径不能为空'),
+    name: z.string().min(1, 'Maven 名称不能为空').optional(),
+    settingsPath: z.string().min(1).optional(),
+    localRepoPath: z.string().min(1).optional()
+  })
+  .strict()
+
+/** maven:update（必须携带 id；settingsPath/localRepoPath：null=清除、缺省=沿用现值） */
+export const mavenUpdateSchema = mavenAddSchema.extend({
+  id: z.string().min(1, '缺少 Maven id'),
+  settingsPath: z.string().min(1).nullable().optional(),
+  localRepoPath: z.string().min(1).nullable().optional()
+})
+
+/** maven:validate（即时校验，不入库） */
+export const mavenValidateSchema = z
+  .object({
+    homePath: z.string().min(1, 'Maven 路径不能为空')
+  })
+  .strict()
+
+/** maven:remove */
+export const mavenRemoveSchema = z
+  .object({
+    id: z.string().min(1, '缺少 Maven id')
+  })
+  .strict()
+
+/** build:run / build:stop / build:getState（v0.7.0 构建按钮；projectId 与项目启停通道同字段名对齐） */
+export const buildProjectSchema = z
+  .object({
+    projectId: z.string().min(1, '缺少 projectId')
+  })
+  .strict()
+
 /** settings:set（局部合并：至少允许空对象做幂等 no-op；键约束见 §2.4） */
 export const settingsSetSchema = z
   .object({
@@ -92,11 +136,21 @@ export const settingsSetSchema = z
     logMaxFileMb: z.number().int().min(1).max(1024).optional(),
     logMaxRotations: z.number().int().min(1).max(10).optional(),
     logRunsToKeep: z.number().int().min(1).max(100).optional(),
+    logRetentionDays: z.number().int().min(1).max(365).optional(),
+    logMaxTotalMb: z.number().int().min(1).max(1_048_576).optional(),
+    stdoutLogDir: z.string().max(1024).optional(),
     scanRoots: z.array(z.string().min(1)).optional(),
     closeToTray: z.boolean().optional(),
     /** v0.5.0 浏览器面板 */
     webEnabled: z.boolean().optional(),
     webPort: z.number().int().min(1).max(65535, '端口范围 1–65535').optional()
+  })
+  .strict()
+
+/** logs:cleanup（缺省 current；legacyDefault 仅清旧默认根内 javamgr 自有 stdout 文件） */
+export const logCleanupSchema = z
+  .object({
+    scope: z.enum(['current', 'legacyDefault']).optional()
   })
   .strict()
 

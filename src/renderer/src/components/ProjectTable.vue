@@ -34,6 +34,7 @@ const emit = defineEmits<{
   logs: [project: ProjectWithRuntime]
   edit: [project: ProjectWithRuntime]
   remove: [project: ProjectWithRuntime]
+  build: [project: ProjectWithRuntime]
   select: [id: string, checked: boolean]
   /** 表头排序点击（el-table sort-change 原样透传；order=null 表示取消排序） */
   sortChange: [prop: string, order: 'ascending' | 'descending' | null]
@@ -148,7 +149,7 @@ function statusText(status: ProjectWithRuntime['status']): string {
       </template>
     </el-table-column>
 
-    <el-table-column label="操作" width="270" fixed="right" align="center">
+    <el-table-column label="操作" width="300" fixed="right" align="center">
       <template #default="{ row }">
         <el-button
           v-if="!isRunningLike(row.status)"
@@ -162,7 +163,16 @@ function statusText(status: ProjectWithRuntime['status']): string {
         <el-button v-else type="danger" size="small" link @click="emit('stop', row.id)">
           停止
         </el-button>
-        <el-button :disabled="!isRunningLike(row.status)" size="small" link @click="emit('restart', row.id)">
+        <el-button
+          v-if="row.mavenId"
+          type="warning"
+          size="small"
+          link
+          @click="emit('build', row)"
+        >
+          构建
+        </el-button>
+        <el-button :disabled="isRunningLike(row.status)" size="small" link @click="emit('restart', row.id)">
           重启
         </el-button>
         <el-button size="small" link @click="emit('logs', row)">日志</el-button>

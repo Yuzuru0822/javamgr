@@ -26,6 +26,8 @@ const emit = defineEmits<{
   logs: [project: ProjectWithRuntime]
   edit: [project: ProjectWithRuntime]
   remove: [project: ProjectWithRuntime]
+  /** v0.7.0：构建（仅配置了构建信息的项目会出现该按钮） */
+  build: [project: ProjectWithRuntime]
   /** 多选勾选/取消（父组件持有 selectedIds 集合） */
   select: [id: string, checked: boolean]
 }>()
@@ -80,6 +82,16 @@ const uptimeText = computed(() => {
       </el-button>
       <el-button v-else type="danger" size="small" plain @click="emit('stop', project.id)">
         停止
+      </el-button>
+      <!-- v0.7.0：配置了构建信息（mavenId）才显示；构建输出在 BuildDialog 对话框流式展示 -->
+      <el-button
+        v-if="project.mavenId"
+        type="warning"
+        size="small"
+        plain
+        @click="emit('build', project)"
+      >
+        构建
       </el-button>
       <el-button :disabled="!isRunningLike" size="small" @click="emit('restart', project.id)">
         重启

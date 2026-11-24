@@ -8,7 +8,7 @@ import {
   ConfigStore,
   DEFAULT_SETTINGS
 } from '../../src/main/config/config-store'
-import type { JdkInput } from '../../src/main/config/config-store'
+import type { JdkInput, MavenInput } from '../../src/main/config/config-store'
 import { resolveAppPaths } from '../../src/main/config/paths'
 import type { AppPaths } from '../../src/main/config/paths'
 import type { ProjectInput, Settings } from '../../src/shared/types'
@@ -64,10 +64,12 @@ const readJsonFile = async (file: string): Promise<unknown> =>
 // ---------- projects CRUD + 变更即写 ----------
 
 describe('projects CRUD', () => {
-  it('首次 init：空目录建默认文件（三个 JSON 均存在）', async () => {
+  it('首次 init：空目录建默认文件（四个 JSON 均存在）', async () => {
     await makeStore()
     const files = await readdir(paths.configDir)
-    expect(new Set(files)).toEqual(new Set(['projects.json', 'jdks.json', 'settings.json']))
+    expect(new Set(files)).toEqual(
+      new Set(['projects.json', 'jdks.json', 'mavens.json', 'settings.json'])
+    )
   })
 
   it('create 生成 uuid id 并出现在列表与磁盘（变更即写，无防抖）', async () => {
@@ -232,6 +234,117 @@ describe('jdks CRUD 与项目引用校验', () => {
     await expect(
       store.updateJdk({ ...jdkInput(), id: 'ghost' })
     ).rejects.toMatchObject({ code: 'NOT_FOUND' })
+  })
+})
+
+// ---------- mavens ----------
+
+describe('mavens CRUD 与项目引用校验', () => {
+  function mavenInput(name = 'Apache Maven 3.9.9'): MavenInput {
+    return {
+      name,
+      homePath: 'D:\\apache-maven-3.9.9',
+      version: '3.9.9',
+      source: 'manual',
+      settingsPath: 'D:\\my-settings.xml',
+      localRepoPath: 'D:\\m2\\repo'
+    }
+  }
+
+  it('add 缺省 id 时生成 uuid；可选字段落键；null 清除语义；全链路', async () => {
+    const store = await makeStore()
+    const added = await store.addMaven(mavenInput())
+    expect(added.id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(added.settingsPath).toBe('D:\\my-settings.xml')
+    expect(added.localRepoPath).toBe('D:\\m2\\repo')
+
+    // null 清除语义在 ipc-registry 装配层转为"删键"（MavenInput）；store 层用解构删键模拟
+    const { settingsPath: _cleared, ...withoutSettings } = added
+    const updated = await store.updateMaven(withoutSettings)
+    expect(updated.settingsPath).toBeUndefined()
+    expect(updated.localRepoPath).toBe('D:\\m2\\repo')
+
+    const removed = await store.removeMaven(added.id)
+    expect(removed.id).toBe(added.id)
+    expect(store.listMavens()).toHaveLength(0)
+  })
+
+  it('remove 被 mavenId 引用时拒绝，错误信息含引用项目名', async () => {
+    const store = await makeStore()
+    const maven = await store.addMaven(mavenInput())
+    await store.createProject({ ...projectInput('BuildableA'), mavenId: maven.id })
+    await store.createProject({
+      ...projectInput('BuildableB'),
+      mavenId: maven.id,
+      buildCommand: 'clean package'
+    })
+
+    const err = await store.removeMaven(maven.id).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ConfigError)
+    expect((err as ConfigError).code).toBe('CONFLICT')
+    expect((err as ConfigError).message).toContain('BuildableA')
+    expect((err as ConfigError).message).toContain('BuildableB')
+    expect(store.listMavens()).toHaveLength(1) // 未被删除
+
+    // 清除项目构建绑定后可正常移除
+    const [a, b] = store.listProjects()
+    await store.updateProject({ ...projectInput('BuildableB'), id: b!.id })
+    await store.deleteProject(a!.id)
+    await expect(store.removeMaven(maven.id)).resolves.toMatchObject({ id: maven.id })
+  })
+
+  it('remove/update 未知 id → NOT_FOUND', async () => {
+    const store = await makeStore()
+    await expect(store.removeMaven('ghost')).rejects.toMatchObject({ code: 'NOT_FOUND' })
+    await expect(
+      store.updateMaven({ ...mavenInput(), id: 'ghost' })
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' })
+  })
+
+  it('项目 mavenId/buildCommand 持久化（含 update 整体替换清除语义）', async () => {
+    const store = await makeStore()
+    const maven = await store.addMaven(mavenInput())
+    const created = await store.createProject({
+      ...projectInput(),
+      mavenId: maven.id,
+      buildCommand: 'clean package -DskipTests'
+    })
+    expect(created.mavenId).toBe(maven.id)
+    expect(created.buildCommand).toBe('clean package -DskipTests')
+
+    // 重启等价：重新 init 读盘后字段仍在
+    const reloaded = new ConfigStore(paths)
+    await reloaded.init()
+    expect(reloaded.listProjects()[0]).toMatchObject({
+      mavenId: maven.id,
+      buildCommand: 'clean package -DskipTests'
+    })
+    expect(reloaded.listMavens()[0]).toMatchObject({ version: '3.9.9' })
+
+    // update 不带 mavenId → 清除（与 logFilePath 语义一致）
+    const updated = await store.updateProject({ ...projectInput(), id: created.id })
+    expect(updated.mavenId).toBeUndefined()
+    expect(updated.buildCommand).toBeUndefined()
+  })
+
+  it('replaceMavens 整体替换 + MAVENS_CHANGED 事件', async () => {
+    const store = await makeStore()
+    const events: unknown[] = []
+    store.on(CONFIG_EVENTS.MAVENS_CHANGED, (payload) => events.push(payload))
+    await store.addMaven(mavenInput('Maven A'))
+    await store.replaceMavens([{ ...mavenInput('Maven B'), id: 'm-b' }])
+    expect(store.listMavens().map((m) => m.name)).toEqual(['Maven B'])
+    expect(events).toHaveLength(2)
+  })
+
+  it('mavens.json 损坏 → 备份重建空列表（不阻塞其余 store）', async () => {
+    await writeFile(paths.mavensFile, '{not-json', 'utf8')
+    const store = await makeStore()
+    expect(store.listMavens()).toEqual([])
+    const backups = (await readdir(paths.configDir)).filter((f) =>
+      f.startsWith('mavens.json.corrupt-')
+    )
+    expect(backups).toHaveLength(1)
   })
 })
 

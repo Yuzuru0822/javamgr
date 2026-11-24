@@ -82,6 +82,18 @@ const services: McpToolServices = {
       { id: 'jdk-17', name: 'Temurin 17', homePath: 'D:\\java17', version: '17', vendor: 'Temurin', source: 'manual' },
       { id: 'jdk-8', name: 'Temurin 8', homePath: 'D:\\java8', version: '8', vendor: 'Temurin', source: 'manual' }
     ],
+    listMavens: () => [
+      {
+        id: 'maven-39',
+        name: 'Apache Maven 3.9.9',
+        homePath: 'D:\\apache-maven-3.9.9',
+        version: '3.9.9',
+        settingsPath: 'D:\\my-settings.xml',
+        localRepoPath: 'D:\\m2\\repo',
+        source: 'manual'
+      },
+      { id: 'maven-36', name: 'Apache Maven 3.6.3', homePath: 'D:\\apache-maven-3.6.3', version: '3.6.3', source: 'scan' }
+    ],
     createProject: async (input) => {
       createInputs.push(input)
       const project: Project = { ...input, id: `id-gen-${++idSeq}` }
@@ -243,9 +255,9 @@ describe('mcp/resolveProject：§2.6 解析链', () => {
   })
 })
 
-// ---------- tools/list：15 工具契约 ----------
+// ---------- tools/list：16 工具契约 ----------
 
-describe('mcp/tools：tools/list 返回 15 工具（原始 7 + 面板同款 6 + 扫描导入 2）', () => {
+describe('mcp/tools：tools/list 返回 16 工具（原始 7 + 面板同款 6 + 扫描导入 2 + 构建配置 1）', () => {
   it('工具名与数量精确匹配', async () => {
     const result = await client.listTools()
     expect(result.tools.map((t) => t.name).sort()).toEqual(
@@ -258,6 +270,7 @@ describe('mcp/tools：tools/list 返回 15 工具（原始 7 + 面板同款 6 + 
         'read_logs',
         'search_logs',
         'list_jdks',
+        'list_mavens',
         'create_project',
         'update_project',
         'delete_project',
@@ -456,6 +469,76 @@ describe('mcp/tools：面板同款补齐工具', () => {
       expect.objectContaining({ id: 'jdk-17', name: 'Temurin 17', version: '17' }),
       expect.objectContaining({ id: 'jdk-8', name: 'Temurin 8' })
     ])
+  })
+
+  it('list_mavens：返回全部 Maven 字段（构建配置 mavenId 候选来源）', async () => {
+    const { payload, isError } = await callTool('list_mavens')
+    expect(isError).toBe(false)
+    expect(payload['mavens']).toEqual([
+      expect.objectContaining({
+        id: 'maven-39',
+        name: 'Apache Maven 3.9.9',
+        version: '3.9.9',
+        settingsPath: 'D:\\my-settings.xml',
+        localRepoPath: 'D:\\m2\\repo'
+      }),
+      expect.objectContaining({ id: 'maven-36', name: 'Apache Maven 3.6.3', version: '3.6.3' })
+    ])
+  })
+
+  it('create_project：构建配置（mavenId + buildCommand）透传；未注册 mavenId → isError 含候选', async () => {
+    const ok = await callTool('create_project', {
+      name: 'BuildSvc',
+      jarPath: 'D:\\jars\\build.jar',
+      jdkId: 'jdk-17',
+      mavenId: 'maven-39',
+      buildCommand: 'clean package -DskipTests'
+    })
+    expect(ok.isError).toBe(false)
+    expect(createInputs.at(-1)).toMatchObject({
+      name: 'BuildSvc',
+      mavenId: 'maven-39',
+      buildCommand: 'clean package -DskipTests'
+    })
+
+    const bad = await callTool('create_project', {
+      name: 'BadBuild',
+      jarPath: 'D:\\jars\\bad.jar',
+      jdkId: 'jdk-17',
+      mavenId: 'maven-missing'
+    })
+    expect(bad.isError).toBe(true)
+    expect(bad.payload['error']).toContain('maven-missing')
+    expect(bad.payload['error']).toContain('maven-39')
+    expect(createInputs.every((i) => i.name !== 'BadBuild')).toBe(true) // 未落库
+  })
+
+  it('update_project：mavenId/buildCommand 三元合并（设置 / null 清除 / 缺省沿用）', async () => {
+    // 设置：绑定 + 命令
+    await callTool('update_project', {
+      project: 'BuildSvc',
+      mavenId: 'maven-36',
+      buildCommand: 'clean deploy'
+    })
+    expect(updateInputs.at(-1)).toMatchObject({ mavenId: 'maven-36', buildCommand: 'clean deploy' })
+
+    // 缺省：只改别的字段，构建配置沿用现值
+    await callTool('update_project', { project: 'BuildSvc', jvmArgs: ['-Xmx2g'] })
+    expect(updateInputs.at(-1)).toMatchObject({
+      jvmArgs: ['-Xmx2g'],
+      mavenId: 'maven-36',
+      buildCommand: 'clean deploy'
+    })
+
+    // null：清除构建绑定与命令
+    const cleared = await callTool('update_project', {
+      project: 'BuildSvc',
+      mavenId: null,
+      buildCommand: null
+    })
+    expect(cleared.isError).toBe(false)
+    expect(cleared.payload['updated']['mavenId']).toBeUndefined()
+    expect(cleared.payload['updated']['buildCommand']).toBeUndefined()
   })
 
   it('create_project：必填校验 + 数组/记录默认空 + 返回生成的 id', async () => {

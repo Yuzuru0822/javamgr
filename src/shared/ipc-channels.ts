@@ -37,10 +37,32 @@ export const IPC_REQUESTS = {
   JDK_UPDATE: 'jdk:update',
   /** {id} | Jdk[] */
   JDK_REMOVE: 'jdk:remove',
+  /** — | Maven[]（探测 M2_HOME/MAVEN_HOME/PATH，合并保留手动条目；瞬间完成无进度事件） */
+  MAVEN_SCAN: 'maven:scan',
+  /** — | Maven[] */
+  MAVEN_LIST: 'maven:list',
+  /** {homePath} | MavenValidation（即时校验不入库；派生版本 + settings.xml 解析建议） */
+  MAVEN_VALIDATE: 'maven:validate',
+  /** {homePath, name?, settingsPath?, localRepoPath?} | Maven[]（版本由主进程校验路径后派生） */
+  MAVEN_ADD: 'maven:add',
+  /** {id, homePath, name?, settingsPath?: string|null, localRepoPath?: string|null} | Maven[]（null=清除可选字段；路径变更时重新校验派生） */
+  MAVEN_UPDATE: 'maven:update',
+  /** {id} | Maven[]（被项目 mavenId 引用时拒绝） */
+  MAVEN_REMOVE: 'maven:remove',
+  /** {projectId} | BuildState（启动构建：项目构建配置 + Maven 条目 + 绑定 JDK 派生命令；输出经 build:output 流式推送，终态 build:statusChanged；v0.7.0 构建按钮） */
+  BUILD_RUN: 'build:run',
+  /** {projectId} | void（取消进行中的构建：杀 mvn 进程树） */
+  BUILD_STOP: 'build:stop',
+  /** {projectId} | BuildState | null（重开对话框恢复输出缓冲与终态） */
+  BUILD_GET_STATE: 'build:getState',
   /** {projectId, lines?, source?: "auto"|"file"|"stdout"} | ReadHistoryResult */
   LOGS_READ_HISTORY: 'logs:readHistory',
   /** {projectId, keyword?, level?, startTime?, endTime?, maxResults?, contextLines?} | SearchResult */
   LOGS_SEARCH: 'logs:search',
+  /** — | LogStorageInfo（当前 stdout 实际目录、默认目录与用量） */
+  LOGS_GET_STORAGE_INFO: 'logs:getStorageInfo',
+  /** {scope?: "current"|"legacyDefault"} | LogCleanupResult（缺省 current 按保留策略清理） */
+  LOGS_CLEANUP: 'logs:cleanup',
   /** — | Settings */
   SETTINGS_GET: 'settings:get',
   /** Settings | Settings */
@@ -77,7 +99,11 @@ export const IPC_EVENTS = {
   /** {port, reason: "user-changed"|"bind-failed"}（bind-failed 携带占用进程名） */
   MCP_PORT_CHANGED: 'mcp:portChanged',
   /** UpdaterStatus（v0.4.0：检查中/发现新版/下载进度/已下载/无新版/失败 全状态推送） */
-  UPDATER_STATUS: 'updater:status'
+  UPDATER_STATUS: 'updater:status',
+  /** BuildOutputEvent（v0.7.0：构建输出批量行，200ms 或 100 行合并） */
+  BUILD_OUTPUT: 'build:output',
+  /** BuildStatusEvent（v0.7.0：构建终态 success/failure/cancelled） */
+  BUILD_STATUS_CHANGED: 'build:statusChanged'
 } as const
 
 export type IpcRequestChannel = (typeof IPC_REQUESTS)[keyof typeof IPC_REQUESTS]

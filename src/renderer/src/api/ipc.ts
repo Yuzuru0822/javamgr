@@ -3,11 +3,19 @@ import { decodeIpcErrorPayload } from '@shared/ipc-error'
 import type { IpcErrorCode } from '@shared/ipc-error'
 import type {
   BatchResult,
+  BuildOutputEvent,
+  BuildState,
+  BuildStatusEvent,
   EventLoopMetrics,
   JarScanResult,
   Jdk,
   JdkValidation,
   LogAppendedEvent,
+  LogCleanupResult,
+  LogCleanupScope,
+  LogStorageInfo,
+  Maven,
+  MavenValidation,
   McpInfo,
   OpResult,
   PortChangedEvent,
@@ -158,11 +166,51 @@ export const ipc = {
       }),
     remove: (id: string): Promise<Jdk[]> => invoke<Jdk[]>(IPC_REQUESTS.JDK_REMOVE, { id })
   },
+  maven: {
+    /** 环境探测（M2_HOME/MAVEN_HOME/PATH）：合并保留手动条目（含自定义 settings/仓库） */
+    scan: (): Promise<Maven[]> => invoke<Maven[]>(IPC_REQUESTS.MAVEN_SCAN),
+    list: (): Promise<Maven[]> => invoke<Maven[]>(IPC_REQUESTS.MAVEN_LIST),
+    /** 即时校验（不入库）：对话框输入路径后反馈版本/settings 解析建议或失败原因 */
+    validate: (homePath: string): Promise<MavenValidation> =>
+      invoke<MavenValidation>(IPC_REQUESTS.MAVEN_VALIDATE, { homePath }),
+    /** 手动添加：版本/名称由主进程校验路径后派生；settings/localRepo 可选 */
+    add: (params: {
+      homePath: string
+      name?: string
+      settingsPath?: string
+      localRepoPath?: string
+    }): Promise<Maven[]> => invoke<Maven[]>(IPC_REQUESTS.MAVEN_ADD, params),
+    /** 编辑：路径变更时主进程重新校验派生；settings/localRepo 传 null 显式清除、缺省沿用 */
+    update: (params: {
+      id: string
+      homePath: string
+      name?: string
+      settingsPath?: string | null
+      localRepoPath?: string | null
+    }): Promise<Maven[]> => invoke<Maven[]>(IPC_REQUESTS.MAVEN_UPDATE, params),
+    remove: (id: string): Promise<Maven[]> => invoke<Maven[]>(IPC_REQUESTS.MAVEN_REMOVE, { id })
+  },
+  build: {
+    /** 启动构建（命令由项目构建配置 + Maven 条目 + 绑定 JDK 派生）；输出经 buildOutput 事件流式推送 */
+    run: (projectId: string): Promise<BuildState> =>
+      invoke<BuildState>(IPC_REQUESTS.BUILD_RUN, { projectId }),
+    /** 取消进行中的构建（杀 mvn 进程树；非进行中时幂等静默） */
+    stop: (projectId: string): Promise<void> => invoke<void>(IPC_REQUESTS.BUILD_STOP, { projectId }),
+    /** 最近一次构建快照（含输出缓冲；重开对话框恢复用）；从未构建过返回 null */
+    getState: (projectId: string): Promise<BuildState | null> =>
+      invoke<BuildState | null>(IPC_REQUESTS.BUILD_GET_STATE, { projectId })
+  },
   logs: {
     readHistory: (params: ReadHistoryParams): Promise<ReadHistoryResult> =>
       invoke<ReadHistoryResult>(IPC_REQUESTS.LOGS_READ_HISTORY, params),
     search: (params: SearchParams): Promise<SearchResult> =>
-      invoke<SearchResult>(IPC_REQUESTS.LOGS_SEARCH, params)
+      invoke<SearchResult>(IPC_REQUESTS.LOGS_SEARCH, params),
+    getStorageInfo: (): Promise<LogStorageInfo> =>
+      invoke<LogStorageInfo>(IPC_REQUESTS.LOGS_GET_STORAGE_INFO),
+    cleanup: (scope?: LogCleanupScope): Promise<LogCleanupResult> =>
+      invoke<LogCleanupResult>(IPC_REQUESTS.LOGS_CLEANUP, {
+        ...(scope !== undefined ? { scope } : {})
+      })
   },
   settings: {
     get: (): Promise<Settings> => invoke<Settings>(IPC_REQUESTS.SETTINGS_GET),
@@ -226,5 +274,17 @@ export const ipcEvents = {
     return b
       ? b.on<UpdaterStatus>(IPC_EVENTS.UPDATER_STATUS, listener)
       : webSubscribe(IPC_EVENTS.UPDATER_STATUS, listener)
+  },
+  buildOutput: (listener: (payload: BuildOutputEvent) => void): (() => void) => {
+    const b = bridge()
+    return b
+      ? b.on<BuildOutputEvent>(IPC_EVENTS.BUILD_OUTPUT, listener)
+      : webSubscribe(IPC_EVENTS.BUILD_OUTPUT, listener)
+  },
+  buildStatusChanged: (listener: (payload: BuildStatusEvent) => void): (() => void) => {
+    const b = bridge()
+    return b
+      ? b.on<BuildStatusEvent>(IPC_EVENTS.BUILD_STATUS_CHANGED, listener)
+      : webSubscribe(IPC_EVENTS.BUILD_STATUS_CHANGED, listener)
   }
 } as const

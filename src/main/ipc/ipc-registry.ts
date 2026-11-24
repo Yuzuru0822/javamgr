@@ -21,15 +21,22 @@
 
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { ZodError } from 'zod'
+import { stat } from 'node:fs/promises'
 import { IPC_EVENTS, IPC_REQUESTS } from '../../shared/ipc-channels'
 import { decodeIpcErrorPayload, encodeIpcErrorPayload } from '../../shared/ipc-error'
 import type { IpcErrorCode, StructuredIpcError } from '../../shared/ipc-error'
 import type {
   BatchResult,
+  BuildState,
   EventLoopMetrics,
   JarScanResult,
   Jdk,
   JdkValidation,
+  LogCleanupResult,
+  LogCleanupScope,
+  LogStorageInfo,
+  Maven,
+  MavenValidation,
   McpInfo,
   OpResult,
   ProjectRuntimeState,
@@ -44,7 +51,12 @@ import type {
 } from '../../shared/types'
 import { ConfigError } from '../config/config-store'
 import type { ConfigStore } from '../config/config-store'
+import { getPaths } from '../config/paths'
 import { managedJarSet, scanJars } from '../jar/jar-scanner'
+import {
+  normalizeStdoutLogParent,
+  resolveAndValidateStdoutLogDir
+} from '../log/log-path'
 import {
   DEFAULT_SCAN_ROOTS,
   mergeJdks,
@@ -52,6 +64,7 @@ import {
   scanJdks,
   validateJdkPath
 } from '../jdk/jdk-scanner'
+import { mergeMavens, scanMavens, validateMavenPath } from '../maven/maven-scanner'
 import type { McpHostStatus } from '../mcp/mcp-host'
 import type { WebHostStatus } from '../web/web-host'
 import * as S from './schemas'
@@ -92,6 +105,12 @@ export interface IpcDependencies {
   }
   /** v0.5.0 浏览器面板（index.ts 注入 WebHost；缺省按设置派生、enabled=false） */
   webStatus?: { getWebStatus(): WebHostStatus }
+  /** v0.7.0 Maven 构建（index.ts 注入 BuildRunner；缺省通道显式报错） */
+  buildRunner?: {
+    run(projectId: string): Promise<BuildState>
+    stop(projectId: string): Promise<void>
+    getState(projectId: string): BuildState | null
+  }
 }
 
 // ---------- S4 注入点：日志服务 ----------
@@ -103,6 +122,11 @@ export interface IpcDependencies {
 export interface LogControl {
   readHistory(params: ReadHistoryParams): Promise<ReadHistoryResult>
   search(params: SearchParams): Promise<SearchResult>
+  /** 保留字段保存后立即按最新设置清理当前目录；部分失败由 result.errors 呈现 */
+  applyRetentionSettings(): Promise<LogCleanupResult>
+  /** current 按保留策略；legacyDefault 显式全删旧默认根内 javamgr 自有 stdout 历史 */
+  cleanupNow(scope?: LogCleanupScope): Promise<LogCleanupResult>
+  getStorageInfo(): Promise<LogStorageInfo>
   /** logFilePath 变更即时切换日志路由（运行中生效） */
   switchRoute(projectId: string): void
 }
@@ -395,6 +419,141 @@ export function registerIpcHandlers(deps: IpcDependencies): IpcRegistryHandle {
     return merged
   })
 
+  // ===== maven：真逻辑（maven-scanner + config-store，2026-11-18 Maven 管理） =====
+
+  register(IPC_REQUESTS.MAVEN_LIST, () => store.listMavens())
+
+  register(IPC_REQUESTS.MAVEN_VALIDATE, async (raw): Promise<MavenValidation> => {
+    const { homePath } = S.mavenValidateSchema.parse(raw)
+    return validateMavenPath(homePath)
+  })
+
+  /** settings.xml 落库前存在性复检（不信任渲染端自检；仓库路径不强校验——可能尚未创建） */
+  const assertSettingsExists = async (settingsPath: string): Promise<void> => {
+    try {
+      const st = await stat(settingsPath)
+      if (!st.isFile()) throw new Error('not a file')
+    } catch {
+      fail('VALIDATION_ERROR', `settings.xml 不存在或不是文件：${settingsPath}`)
+    }
+  }
+
+  register(IPC_REQUESTS.MAVEN_ADD, async (raw) => {
+    const { homePath, name, settingsPath, localRepoPath } = S.mavenAddSchema.parse(raw)
+    // 服务端复检（不信任渲染端自报信息）：路径判定 + 派生版本
+    const validation = await validateMavenPath(homePath)
+    if (!validation.ok || !validation.maven) {
+      fail('VALIDATION_ERROR', `Maven 添加失败：${validation.error}`, { homePath })
+    }
+    const draft = validation.maven
+    // 按 homePath 去重：重复添加给出明确冲突而非产生重复条目
+    const dup = store
+      .listMavens()
+      .find((m) => normalizeHomePath(m.homePath) === normalizeHomePath(draft.homePath))
+    if (dup) {
+      fail('CONFLICT', `该路径已存在（${dup.name}）：${dup.homePath}`, { id: dup.id })
+    }
+    if (settingsPath !== undefined) await assertSettingsExists(settingsPath)
+    await store.addMaven({
+      ...draft,
+      ...(name !== undefined ? { name } : {}),
+      ...(settingsPath !== undefined ? { settingsPath } : {}),
+      ...(localRepoPath !== undefined ? { localRepoPath } : {})
+    })
+    return store.listMavens()
+  })
+
+  register(IPC_REQUESTS.MAVEN_UPDATE, async (raw) => {
+    const input = S.mavenUpdateSchema.parse(raw)
+    const existing = store.listMavens().find((m) => m.id === input.id)
+    if (!existing) {
+      fail('NOT_FOUND', `Maven 不存在：${input.id}`)
+    }
+    // 仅路径实际变化才重新校验派生（改名称/settings/仓库不触发探测）
+    let base: Maven = existing
+    if (normalizeHomePath(input.homePath) !== normalizeHomePath(existing.homePath)) {
+      const validation = await validateMavenPath(input.homePath)
+      if (!validation.ok || !validation.maven) {
+        fail('VALIDATION_ERROR', `Maven 路径校验失败：${validation.error}`, {
+          id: input.id,
+          homePath: input.homePath
+        })
+      }
+      base = { ...validation.maven, id: input.id } // 保留原 id（项目 mavenId 引用不失效）
+    }
+    // 新路径不得与其他条目重复（按 homePath 规范化比对，排除自身）
+    const dup = store
+      .listMavens()
+      .find(
+        (m) =>
+          m.id !== input.id && normalizeHomePath(m.homePath) === normalizeHomePath(base.homePath)
+      )
+    if (dup) {
+      fail('CONFLICT', `该路径已被「${dup.name}」使用：${dup.homePath}`, { id: dup.id })
+    }
+    if (input.settingsPath !== undefined && input.settingsPath !== null) {
+      await assertSettingsExists(input.settingsPath)
+    }
+    // 可选字段合并语义：缺省沿用现值、null 显式清除、值=设置。
+    // 注意先从 base 剥离可选字段再条件落键——直接 spread base 会让"清除"失效（旧键被带回）
+    const { settingsPath: _baseSettings, localRepoPath: _baseRepo, ...baseCore } = base
+    const settingsPath =
+      input.settingsPath !== undefined ? (input.settingsPath ?? undefined) : base.settingsPath
+    const localRepoPath =
+      input.localRepoPath !== undefined ? (input.localRepoPath ?? undefined) : base.localRepoPath
+    await store.updateMaven({
+      ...baseCore,
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(settingsPath !== undefined ? { settingsPath } : {}),
+      ...(localRepoPath !== undefined ? { localRepoPath } : {})
+    })
+    return store.listMavens()
+  })
+
+  register(IPC_REQUESTS.MAVEN_REMOVE, async (raw) => {
+    const { id } = S.mavenRemoveSchema.parse(raw)
+    await store.removeMaven(id) // 被项目 mavenId 引用 → ConfigError CONFLICT（含引用项目名）
+    return store.listMavens()
+  })
+
+  register(IPC_REQUESTS.MAVEN_SCAN, async () => {
+    // 环境探测（M2_HOME/MAVEN_HOME/PATH）：手动条目原样保留（含自定义 settings/仓库），
+    // scan 条目刷新元数据保 id 且不覆盖用户改过的可选字段（maven-scanner.mergeMavens）
+    const scanned = await scanMavens()
+    const merged = mergeMavens(store.listMavens(), scanned)
+    await store.replaceMavens(merged)
+    return merged
+  })
+
+  // ===== build：v0.7.0 构建按钮（BuildRunner；输出/终态经 build:output / build:statusChanged 事件推送） =====
+
+  const requireBuildRunner = (channel: string): NonNullable<IpcDependencies['buildRunner']> => {
+    if (!deps.buildRunner) {
+      fail('NOT_IMPLEMENTED', `通道 ${channel} 不可用：主进程未装配构建执行器（buildRunner 缺失）`)
+    }
+    return deps.buildRunner
+  }
+
+  register(IPC_REQUESTS.BUILD_RUN, async (raw): Promise<BuildState> => {
+    const { projectId } = S.buildProjectSchema.parse(raw)
+    try {
+      return await requireBuildRunner(IPC_REQUESTS.BUILD_RUN).run(projectId)
+    } catch (err) {
+      // BuildRunner 抛中文 Error（配置缺失/正在构建）：VALIDATION_ERROR 语义（可修正重试）
+      fail('VALIDATION_ERROR', err instanceof Error ? err.message : String(err), { projectId })
+    }
+  })
+
+  register(IPC_REQUESTS.BUILD_STOP, async (raw) => {
+    const { projectId } = S.buildProjectSchema.parse(raw)
+    await requireBuildRunner(IPC_REQUESTS.BUILD_STOP).stop(projectId)
+  })
+
+  register(IPC_REQUESTS.BUILD_GET_STATE, (raw): BuildState | null => {
+    const { projectId } = S.buildProjectSchema.parse(raw)
+    return requireBuildRunner(IPC_REQUESTS.BUILD_GET_STATE).getState(projectId)
+  })
+
   // ===== logs：S4 log-manager（IPC 与 MCP read_logs/search_logs 同源） =====
 
   const requireLogService = (channel: string): LogControl => {
@@ -414,11 +573,56 @@ export function registerIpcHandlers(deps: IpcDependencies): IpcRegistryHandle {
     return requireLogService(IPC_REQUESTS.LOGS_SEARCH).search(params)
   })
 
+  register(IPC_REQUESTS.LOGS_GET_STORAGE_INFO, () =>
+    requireLogService(IPC_REQUESTS.LOGS_GET_STORAGE_INFO).getStorageInfo()
+  )
+
+  register(IPC_REQUESTS.LOGS_CLEANUP, (raw) => {
+    const { scope } = S.logCleanupSchema.parse(raw)
+    return requireLogService(IPC_REQUESTS.LOGS_CLEANUP).cleanupNow(scope)
+  })
+
   // ===== settings：真逻辑 =====
 
   register(IPC_REQUESTS.SETTINGS_GET, () => store.getSettings())
 
-  register(IPC_REQUESTS.SETTINGS_SET, (raw) => store.setSettings(S.settingsSetSchema.parse(raw)))
+  register(IPC_REQUESTS.SETTINGS_SET, async (raw) => {
+    const patch = S.settingsSetSchema.parse(raw)
+    if (patch.stdoutLogDir !== undefined) {
+      const normalized = normalizeStdoutLogParent(patch.stdoutLogDir)
+      // 只有实际变更才创建目录/写探针；规范化后的值才允许落库，重启装配沿用同一解析口径。
+      if (normalized !== store.getSettings().stdoutLogDir) {
+        try {
+          await resolveAndValidateStdoutLogDir(normalized, getPaths().logsDir)
+        } catch (err) {
+          fail(
+            'VALIDATION_ERROR',
+            `stdout 日志目录校验失败：${err instanceof Error ? err.message : String(err)}`
+          )
+        }
+      }
+      patch.stdoutLogDir = normalized
+    }
+
+    const retentionKeys = [
+      'logMaxFileMb',
+      'logMaxRotations',
+      'logRunsToKeep',
+      'logRetentionDays',
+      'logMaxTotalMb'
+    ] as const
+    const shouldApplyRetention = retentionKeys.some((key) => patch[key] !== undefined)
+    const saved = await store.setSettings(patch)
+    if (shouldApplyRetention && deps.logService) {
+      try {
+        await deps.logService.applyRetentionSettings()
+      } catch (err) {
+        // 设置已成功落盘，清理失败不得把 settings:set 变成失败而诱导 UI 回滚。
+        console.error('[ipc] 日志保留设置已保存，但立即清理失败：', err)
+      }
+    }
+    return saved
+  })
 
   // ===== app =====
 

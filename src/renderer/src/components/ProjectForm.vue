@@ -5,13 +5,17 @@ import { ElMessage } from 'element-plus'
 import type { ProjectInput, ProjectWithRuntime } from '@shared/types'
 import { ipc } from '@renderer/api/ipc'
 import { useJdksStore } from '@renderer/stores/jdks'
+import { useMavensStore } from '@renderer/stores/mavens'
 import { useProjectsStore } from '@renderer/stores/projects'
 import EnvVarEditor from '@renderer/components/EnvVarEditor.vue'
 
 /**
  * 项目新建/编辑表单（计划 §2.4 / §3 S3.6，el-dialog）：
- * 名称 / jar 路径(文件选择) / JDK 下拉(空时提示去 JDK 页) / JVM 参数 / 程序参数 /
- * 环境变量(EnvVarEditor) / 日志文件路径(可选) / 编码覆盖(auto|utf8|gbk)。
+ * 「启动配置」tab：名称 / jar 路径(文件选择) / JDK 下拉(空时提示去 JDK 页) / JVM 参数 /
+ * 程序参数 / 环境变量(EnvVarEditor) / 日志文件路径(可选) / 编码覆盖(auto|utf8|gbk)；
+ * 「构建配置」tab（2026-11-18）：Maven 下拉（可选绑定，来自 Maven 管理页）+ 构建命令
+ * （如 clean package -DskipTests）+ 构建目录（缺省自动推断）——配置后项目卡片出现
+ * 「构建」按钮（BuildRunner 执行，BuildDialog 流式展示输出）。
  *
  * 编辑运行中项目：允许保存但提示"重启后生效"（jarPath/JVM 参数等不热替换）；
  * logFilePath 变更为例外——S4 将在此处调用即时切换钩子（log-manager 重路由+重置游标）。
@@ -28,6 +32,7 @@ const emit = defineEmits<{
 }>()
 
 const jdksStore = useJdksStore()
+const mavensStore = useMavensStore()
 const projectsStore = useProjectsStore()
 const router = useRouter()
 
@@ -39,7 +44,11 @@ const form = reactive({
   programArgsText: '',
   envVars: {} as Record<string, string>,
   logFilePath: '',
-  encodingOverride: 'auto' as 'auto' | 'utf8' | 'gbk'
+  encodingOverride: 'auto' as 'auto' | 'utf8' | 'gbk',
+  // 构建配置（可选；mavenId 为空 = 不绑定）
+  mavenId: '',
+  buildCommand: '',
+  buildDir: ''
 })
 
 const isEdit = computed(() => props.project !== null)
@@ -61,6 +70,9 @@ watch(
       form.envVars = { ...p.envVars }
       form.logFilePath = p.logFilePath ?? ''
       form.encodingOverride = p.encodingOverride ?? 'auto'
+      form.mavenId = p.mavenId ?? ''
+      form.buildCommand = p.buildCommand ?? ''
+      form.buildDir = p.buildDir ?? ''
     } else {
       form.name = ''
       form.jarPath = ''
@@ -70,6 +82,13 @@ watch(
       form.envVars = {}
       form.logFilePath = ''
       form.encodingOverride = 'auto'
+      form.mavenId = ''
+      form.buildCommand = ''
+      form.buildDir = ''
+    }
+    // 构建配置 tab 的 Maven 下拉候选（直达编辑场景首次打开时补拉）
+    if (!mavensStore.loaded) {
+      void mavensStore.refresh().catch(() => {})
     }
   }
 )
@@ -100,11 +119,22 @@ async function pickJar(): Promise<void> {
   }
 }
 
+async function pickBuildDir(): Promise<void> {
+  try {
+    const picked = await ipc.app.pickFile({ title: '选择构建工作目录（含 pom.xml）', directory: true })
+    if (picked) form.buildDir = picked
+  } catch (err) {
+    ElMessage.error(`目录选择失败：${errText(err)}`)
+  }
+}
+
 function close(): void {
   emit('update:visible', false)
 }
 
 async function submit(): Promise<void> {
+  const buildCommand = form.buildCommand.trim()
+  const buildDir = form.buildDir.trim()
   const input: ProjectInput = {
     name: form.name.trim(),
     jarPath: form.jarPath.trim(),
@@ -113,7 +143,10 @@ async function submit(): Promise<void> {
     programArgs: toArgs(form.programArgsText),
     envVars: { ...form.envVars },
     ...(form.logFilePath.trim().length > 0 ? { logFilePath: form.logFilePath.trim() } : {}),
-    ...(form.encodingOverride !== 'auto' ? { encodingOverride: form.encodingOverride } : {})
+    ...(form.encodingOverride !== 'auto' ? { encodingOverride: form.encodingOverride } : {}),
+    ...(form.mavenId.length > 0 ? { mavenId: form.mavenId } : {}),
+    ...(buildCommand.length > 0 ? { buildCommand } : {}),
+    ...(buildDir.length > 0 ? { buildDir } : {})
   }
   try {
     const wasRunning = editingRunning.value
@@ -145,6 +178,11 @@ function goJdkPage(): void {
   close()
   void router.push('/jdk')
 }
+
+function goMavenPage(): void {
+  close()
+  void router.push('/maven')
+}
 </script>
 
 <template>
@@ -162,64 +200,116 @@ function goJdkPage(): void {
       title="项目正在运行：保存的配置重启后生效（日志文件路径变更除外）"
       class="run-hint"
     />
-    <el-form label-width="96px">
-      <el-form-item label="名称" required>
-        <el-input v-model="form.name" placeholder="如 LoggyDemo" maxlength="64" />
-      </el-form-item>
-      <el-form-item label="Jar 路径" required>
-        <div class="jar-row">
-          <el-input v-model="form.jarPath" placeholder="预构建 jar 的绝对路径（不做编译构建）" />
-          <el-button @click="pickJar">浏览…</el-button>
-        </div>
-      </el-form-item>
-      <el-form-item label="JDK" required>
-        <template v-if="jdksStore.jdks.length > 0">
-          <el-select v-model="form.jdkId" placeholder="选择绑定的 JDK" class="jdk-select">
-            <el-option
-              v-for="jdk in jdksStore.jdks"
-              :key="jdk.id"
-              :value="jdk.id"
-              :label="`${jdk.name}（${jdk.version}）`"
+    <el-tabs>
+      <el-tab-pane label="启动配置">
+        <el-form label-width="96px">
+          <el-form-item label="名称" required>
+            <el-input v-model="form.name" placeholder="如 LoggyDemo" maxlength="64" />
+          </el-form-item>
+          <el-form-item label="Jar 路径" required>
+            <div class="jar-row">
+              <el-input v-model="form.jarPath" placeholder="预构建 jar 的绝对路径（不做编译构建）" />
+              <el-button @click="pickJar">浏览…</el-button>
+            </div>
+          </el-form-item>
+          <el-form-item label="JDK" required>
+            <template v-if="jdksStore.jdks.length > 0">
+              <el-select v-model="form.jdkId" placeholder="选择绑定的 JDK" class="full-width">
+                <el-option
+                  v-for="jdk in jdksStore.jdks"
+                  :key="jdk.id"
+                  :value="jdk.id"
+                  :label="`${jdk.name}（${jdk.version}）`"
+                />
+              </el-select>
+            </template>
+            <template v-else>
+              <div class="empty-hint">
+                尚无 JDK：
+                <el-button link type="primary" @click="goJdkPage">去 JDK 页扫描/添加</el-button>
+              </div>
+            </template>
+          </el-form-item>
+          <el-form-item label="JVM 参数">
+            <el-input
+              v-model="form.jvmArgsText"
+              type="textarea"
+              :rows="2"
+              placeholder="每行一个，如 -Xmx256m 或 -Dloggy.mode=gbk"
             />
-          </el-select>
-        </template>
-        <template v-else>
-          <div class="jdk-empty">
-            尚无 JDK：
-            <el-button link type="primary" @click="goJdkPage">去 JDK 页扫描/添加</el-button>
-          </div>
-        </template>
-      </el-form-item>
-      <el-form-item label="JVM 参数">
-        <el-input
-          v-model="form.jvmArgsText"
-          type="textarea"
-          :rows="2"
-          placeholder="每行一个，如 -Xmx256m 或 -Dloggy.mode=gbk"
-        />
-      </el-form-item>
-      <el-form-item label="程序参数">
-        <el-input
-          v-model="form.programArgsText"
-          type="textarea"
-          :rows="2"
-          placeholder="每行一个，跟在 -jar xxx.jar 之后，如 --interval=1000"
-        />
-      </el-form-item>
-      <el-form-item label="环境变量">
-        <EnvVarEditor v-model="form.envVars" />
-      </el-form-item>
-      <el-form-item label="日志文件">
-        <el-input v-model="form.logFilePath" placeholder="可选：logback 日志文件路径，配置后 tail 文件而非捕获 stdout" />
-      </el-form-item>
-      <el-form-item label="编码覆盖">
-        <el-select v-model="form.encodingOverride" class="jdk-select">
-          <el-option value="auto" label="auto（自动检测 UTF-8/GBK）" />
-          <el-option value="utf8" label="utf8" />
-          <el-option value="gbk" label="gbk" />
-        </el-select>
-      </el-form-item>
-    </el-form>
+          </el-form-item>
+          <el-form-item label="程序参数">
+            <el-input
+              v-model="form.programArgsText"
+              type="textarea"
+              :rows="2"
+              placeholder="每行一个，跟在 -jar xxx.jar 之后，如 --interval=1000"
+            />
+          </el-form-item>
+          <el-form-item label="环境变量">
+            <EnvVarEditor v-model="form.envVars" />
+          </el-form-item>
+          <el-form-item label="日志文件">
+            <el-input v-model="form.logFilePath" placeholder="可选：logback 日志文件路径，配置后 tail 文件而非捕获 stdout" />
+          </el-form-item>
+          <el-form-item label="编码覆盖">
+            <el-select v-model="form.encodingOverride" class="full-width">
+              <el-option value="auto" label="auto（自动检测 UTF-8/GBK）" />
+              <el-option value="utf8" label="utf8" />
+              <el-option value="gbk" label="gbk" />
+            </el-select>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+      <el-tab-pane label="构建配置">
+        <el-form label-width="96px">
+          <el-form-item label="Maven">
+            <template v-if="mavensStore.mavens.length > 0">
+              <el-select
+                v-model="form.mavenId"
+                placeholder="选择构建用的 Maven（可留空）"
+                class="full-width"
+                clearable
+              >
+                <el-option
+                  v-for="maven in mavensStore.mavens"
+                  :key="maven.id"
+                  :value="maven.id"
+                  :label="`${maven.name}${maven.source === 'manual' ? '' : '（探测）'}`"
+                />
+              </el-select>
+            </template>
+            <template v-else>
+              <div class="empty-hint">
+                尚无 Maven：
+                <el-button link type="primary" @click="goMavenPage">去 Maven 页探测/添加</el-button>
+              </div>
+            </template>
+          </el-form-item>
+          <el-form-item label="构建命令">
+            <el-input
+              v-model="form.buildCommand"
+              placeholder="如 clean package -DskipTests（Maven goals 与参数）"
+            />
+          </el-form-item>
+          <el-form-item label="构建目录">
+            <div class="jar-row">
+              <el-input
+                v-model="form.buildDir"
+                placeholder="留空自动：jar 在 target\ 下取项目根，否则 jar 所在目录"
+                clearable
+              />
+              <el-button @click="pickBuildDir">浏览…</el-button>
+            </div>
+          </el-form-item>
+          <el-form-item label=" ">
+            <span class="build-note">
+              配置后项目卡片出现「构建」按钮（用绑定的 Maven 与 JDK 跑 mvn）；启动仍走预构建 jar，构建产物需重启生效。留空 Maven 表示无构建信息。
+            </span>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+    </el-tabs>
     <template #footer>
       <el-button @click="close">取消</el-button>
       <el-button type="primary" :disabled="!canSubmit" @click="submit">
@@ -238,11 +328,15 @@ function goJdkPage(): void {
   gap: 8px;
   width: 100%;
 }
-.jdk-select {
+.full-width {
   width: 100%;
 }
-.jdk-empty {
+.empty-hint {
   color: var(--el-text-color-secondary);
   font-size: 13px;
+}
+.build-note {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
 }
 </style>

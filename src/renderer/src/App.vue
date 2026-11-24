@@ -24,6 +24,7 @@ onMounted(() => {
       <el-menu :default-active="activeMenu" router>
         <el-menu-item index="/projects">项目面板</el-menu-item>
         <el-menu-item index="/jdk">JDK 管理</el-menu-item>
+        <el-menu-item index="/maven">Maven 管理</el-menu-item>
         <el-menu-item index="/settings">设置</el-menu-item>
       </el-menu>
     </el-aside>

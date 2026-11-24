@@ -25,6 +25,7 @@ export interface AppPaths {
   readonly logsDir: string
   readonly projectsFile: string
   readonly jdksFile: string
+  readonly mavensFile: string
   readonly settingsFile: string
   /** <userData>/runs.json（S3） */
   readonly runsFile: string
@@ -65,6 +66,7 @@ export function resolveAppPaths(userDataDir: string): AppPaths {
     logsDir,
     projectsFile: path.join(configDir, 'projects.json'),
     jdksFile: path.join(configDir, 'jdks.json'),
+    mavensFile: path.join(configDir, 'mavens.json'),
     settingsFile: path.join(configDir, 'settings.json'),
     runsFile: path.join(userDataDir, 'runs.json'),
     mcpPortFile: path.join(userDataDir, 'mcp.port')
@@ -76,8 +78,11 @@ export function getPaths(): AppPaths {
   return resolveAppPaths(getUserDataDir())
 }
 
-/** 启动时建目录（幂等）：config/ 与 logs/。runs.json 与 mcp.port 落在 userData 根，无需预建目录。 */
+/**
+ * 启动时仅预建 config/（幂等）。stdout 实际目录须在 store.init 后按设置解析并验证，
+ * 不能在这里提前创建默认 logs/，否则自定义目录启动失败时可能误导持久化回退。
+ * runs.json 与 mcp.port 落在 userData 根，无需预建目录。
+ */
 export async function ensureDirs(paths: AppPaths = getPaths()): Promise<void> {
   await mkdir(paths.configDir, { recursive: true })
-  await mkdir(paths.logsDir, { recursive: true })
 }
